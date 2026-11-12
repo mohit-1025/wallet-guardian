@@ -1,0 +1,207 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 240 30% 98%;
+    --foreground: 232 35% 12%;
+    --surface: 0 0% 100%;
+    --card: 0 0% 100%;
+    --card-foreground: 232 35% 12%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 232 35% 12%;
+    --primary: 243 58% 45%;
+    --primary-foreground: 0 0% 100%;
+    --primary-soft: 243 70% 96%;
+    --secondary: 240 24% 95%;
+    --secondary-foreground: 232 30% 22%;
+    --muted: 240 22% 95%;
+    --muted-foreground: 233 12% 45%;
+    --accent: 243 60% 96%;
+    --accent-foreground: 243 58% 38%;
+    --border: 236 22% 90%;
+    --input: 236 22% 88%;
+    --ring: 243 58% 55%;
+    --success: 158 64% 33%;
+    --success-foreground: 0 0% 100%;
+    --success-soft: 156 55% 94%;
+    --warning: 36 90% 42%;
+    --warning-foreground: 0 0% 100%;
+    --warning-soft: 42 96% 93%;
+    --danger: 350 74% 46%;
+    --danger-foreground: 0 0% 100%;
+    --danger-soft: 352 90% 96%;
+  }
+
+  .dark {
+    --background: 232 30% 7%;
+    --foreground: 230 25% 94%;
+    --surface: 232 26% 10%;
+    --card: 232 25% 10.5%;
+    --card-foreground: 230 25% 94%;
+    --popover: 232 25% 11%;
+    --popover-foreground: 230 25% 94%;
+    --primary: 242 78% 72%;
+    --primary-foreground: 243 55% 14%;
+    --primary-soft: 243 40% 18%;
+    --secondary: 232 22% 16%;
+    --secondary-foreground: 230 25% 92%;
+    --muted: 232 22% 15%;
+    --muted-foreground: 230 12% 64%;
+    --accent: 243 35% 19%;
+    --accent-foreground: 242 80% 84%;
+    --border: 232 20% 19%;
+    --input: 232 20% 23%;
+    --ring: 242 78% 72%;
+    --success: 158 58% 52%;
+    --success-foreground: 160 60% 8%;
+    --success-soft: 160 40% 15%;
+    --warning: 38 92% 60%;
+    --warning-foreground: 36 80% 10%;
+    --warning-soft: 36 50% 15%;
+    --danger: 352 85% 66%;
+    --danger-foreground: 350 60% 10%;
+    --danger-soft: 352 45% 16%;
+  }
+
+  * {
+    @apply border-border;
+  }
+
+  html {
+    -webkit-text-size-adjust: 100%;
+    scroll-behavior: smooth;
+  }
+
+  body {
+    @apply bg-background text-foreground antialiased;
+    font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+    min-height: 100dvh;
+  }
+
+  ::selection {
+    background: hsl(var(--primary) / 0.18);
+  }
+
+  :focus-visible {
+    @apply outline-none ring-2 ring-ring ring-offset-2 ring-offset-background;
+  }
+
+  h1, h2, h3, h4 {
+    @apply font-semibold tracking-tight;
+  }
+
+  input[type="number"]::-webkit-outer-spin-button,
+  input[type="number"]::-webkit-inner-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+  }
+  input[type="number"] {
+    -moz-appearance: textfield;
+  }
+}
+
+@layer utilities {
+  .tabular {
+    font-variant-numeric: tabular-nums;
+    font-feature-settings: "tnum";
+    letter-spacing: -0.01em;
+  }
+  .glass {
+    @apply bg-card/85 backdrop-blur-xl;
+  }
+  .surface-grid {
+    background-image:
+      radial-gradient(circle at 1px 1px, hsl(var(--border)) 1px, transparent 0);
+    background-size: 22px 22px;
+  }
+  .no-scrollbar::-webkit-scrollbar {
+    display: none;
+  }
+  .no-scrollbar {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+  .text-balance {
+    text-wrap: balance;
+  }
+  .mask-fade-b {
+    -webkit-mask-image: linear-gradient(to bottom, black 70%, transparent 100%);
+    mask-image: linear-gradient(to bottom, black 70%, transparent 100%);
+  }
+}
+
+/* Toasts */
+[data-sonner-toast] {
+  font-family: inherit !important;
+  border-radius: 14px !important;
+}
+
+/* Custom scrollbar for desktop */
+@media (min-width: 768px) {
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: hsl(var(--border)) transparent;
+  }
+  *::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  *::-webkit-scrollbar-thumb {
+    background: hsl(var(--border));
+    border-radius: 999px;
+    border: 3px solid hsl(var(--background));
+  }
+  *::-webkit-scrollbar-track {
+    background: transparent;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* Overlay + dialog motion */
+@keyframes wg-overlay-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@keyframes wg-dialog-in {
+  from { opacity: 0; transform: translateY(24px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@keyframes wg-dialog-in-desktop {
+  from { opacity: 0; transform: translate(-50%, -48%) scale(0.97); }
+  to { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+}
+.dialog-overlay[data-state="open"] { animation: wg-overlay-in 180ms ease-out; }
+.dialog-content[data-state="open"] { animation: wg-dialog-in 260ms cubic-bezier(0.22, 1, 0.36, 1); }
+@media (min-width: 640px) {
+  .dialog-content[data-state="open"] { animation: wg-dialog-in-desktop 240ms cubic-bezier(0.22, 1, 0.36, 1); }
+}
+@keyframes wg-fade-out { from { opacity: 1; } to { opacity: 0; } }
+.animate-fade-out[data-state="closed"] { animation: wg-fade-out 120ms ease-in; }
+
+/* Recharts polish */
+.recharts-wrapper, .recharts-surface { outline: none !important; }
+.recharts-cartesian-axis-tick-value { font-size: 11px; fill: hsl(var(--muted-foreground)); }
+.recharts-tooltip-cursor { fill: hsl(var(--muted) / 0.55); }
+.recharts-curve.recharts-tooltip-cursor { stroke: hsl(var(--border)); }
+.recharts-sector:focus, .recharts-rectangle:focus, .recharts-dot:focus { outline: none; }
+
+input[type="date"]::-webkit-calendar-picker-indicator {
+  opacity: 0.55;
+  cursor: pointer;
+}
+.dark input[type="date"]::-webkit-calendar-picker-indicator { filter: invert(1); }
+
+/* Focus ring for custom clickable cards */
+.ring-offset-background { --tw-ring-offset-color: hsl(var(--background)); }
