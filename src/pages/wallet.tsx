@@ -1,7 +1,7 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import {
-  ArrowDownLeft, ArrowRightLeft, ArrowUpRight, Building2, CalendarClock, CheckCircle2, CreditCard,
-  ExternalLink, FlaskConical, Landmark, Plus, RefreshCw, ShieldCheck, Sparkles, Wallet,
+  ArrowDownLeft, ArrowUpRight, CalendarClock, CheckCircle2, ExternalLink,
+  FlaskConical, Plus, RefreshCw, ShieldCheck, Sparkles, Wallet,
 } from "lucide-react";
 import { Link } from "react-router-dom";
 import { toast } from "sonner";
@@ -13,23 +13,12 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { Money, MoneyInput } from "@/components/ui/money";
 import { useApp, useAppData } from "@/lib/app-context";
 import { useIntegration } from "@/lib/integration-context";
-import {
-  capturePayPalOrder, createPayPalOrder, fetchPayPalReporting,
-  type PayPalOrderResult, type ReportingOverview,
-} from "@/lib/paypal";
+import { capturePayPalOrder, createPayPalOrder, sendPayPalPayout, type PayPalOrderResult } from "@/lib/paypal";
 import { fmtDate } from "@/lib/dates";
 import { formatMoney, parseToInr } from "@/lib/money";
-import type { Account } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 type Mode = "topup" | "pay";
-
-const ACCOUNT_META: Record<Account["type"], { label: string; icon: typeof Wallet }> = {
-  paypal: { label: "PayPal wallet", icon: Wallet },
-  bank: { label: "Bank account", icon: Landmark },
-  card: { label: "Credit card", icon: CreditCard },
-  wallet: { label: "Wallet", icon: Wallet },
-};
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
 
@@ -37,26 +26,12 @@ function isSimulatedId(id?: string) {
   return !!id && id.startsWith("SIM-");
 }
 
-function formatNative(value: number, code: string) {
-  try {
-    return new Intl.NumberFormat("en-US", {
-      style: "currency",
-      currency: code,
-      currencyDisplay: "narrowSymbol",
-      minimumFractionDigits: 2,
-    }).format(value);
-  } catch {
-    return `${code} ${value.toFixed(2)}`;
-  }
-}
-
 export default function WalletPage() {
   const data = useAppData();
   const { session, topUpWallet, payPerson } = useApp();
   const { status, loading, refresh } = useIntegration();
   const currency = data.profile.currency;
-  const live = session?.env === "live";
-  const envName = live ? "live PayPal" : "the PayPal sandbox";
+  const isDemo = session?.provider === "demo";
 
   const [mode, setMode] = useState<Mode | null>(null);
   const [amount, setAmount] = useState("");
@@ -65,33 +40,12 @@ export default function WalletPage() {
   const [note, setNote] = useState("");
   const [busy, setBusy] = useState(false);
   const [order, setOrder] = useState<PayPalOrderResult | null>(null);
-  const [receipt, setReceipt] = useState<{ orderId: string; captureId?: string; simulated: boolean; amountInr: number } | null>(null);
+  const [receipt, setReceipt] = useState<{ kind: Mode; refId: string; captureId?: string; simulated: boolean; amountInr: number } | null>(null);
   const [filter, setFilter] = useState<"all" | "topup" | "payment">("all");
-  const canReport = session?.provider !== "demo" && status.capabilities.businessReporting;
-  const [report, setReport] = useState<ReportingOverview | null>(null);
-  const [reportError, setReportError] = useState<string | null>(null);
-  const [reportLoading, setReportLoading] = useState(false);
 
-  const loadReport = useCallback(async () => {
-    setReportLoading(true);
-    setReportError(null);
-    try {
-      setReport(await fetchPayPalReporting());
-    } catch (err) {
-      setReportError(err instanceof Error ? err.message : "Could not read PayPal business reporting.");
-    } finally {
-      setReportLoading(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    if (!canReport) {
-      setReport(null);
-      setReportError(null);
-      return;
-    }
-    void loadReport();
-  }, [canReport, loadReport]);
+  // The balance moves the moment a movement is registered — top-ups credit
+  // it, payments and autopays debit it. Nothing is read back from PayPal.
+  const shownBalance = data.profile.walletBalance;
 
   const paypalTx = useMemo(
     () => data.transactions.filter((t) => t.source === "paypal" || t.source === "autopay").slice(0, 12),
@@ -104,11 +58,15 @@ export default function WalletPage() {
   const monthIn = monthTx.filter((t) => t.type === "income").reduce((s, t) => s + t.amount, 0);
   const monthOut = monthTx.filter((t) => t.type === "expense").reduce((s, t) => s + t.amount, 0);
 
-  const bank = data.accounts.find((a) => a.type === "bank");
-  const card = data.accounts.find((a) => a.type === "card");
   const upcomingAutopay = data.scheduledPayments.filter((p) => p.status === "active").length;
 
   const presets = currency === "INR" ? [500, 1000, 2500, 5000] : [10, 25, 50, 100];
+
+  const balanceNote = isDemo
+    ? "Simulated demo workspace"
+    : status.source === "user"
+      ? "Your sandbox keys — attached at onboarding"
+      : "Simulation — sandbox keys not attached";
 
   function openCheckout(nextMode: Mode) {
     setMode(nextMode);
@@ -126,21 +84,24 @@ export default function WalletPage() {
     setMode(null);
   }
 
-  async function finalize(current: PayPalOrderResult, amt: number) {
-    const captured = await capturePayPalOrder(current.id);
-    if (mode === "topup") {
-      topUpWallet(amt, current.id, captured.captureId);
-    } else {
-      payPerson({ amountInr: amt, name: payeeName.trim(), email: payeeEmail.trim(), note: note.trim(), orderId: current.id, captureId: captured.captureId });
+  // The capture request goes to the sandbox; whatever it answers (or fails),
+  // the top-up is registered and the balance credited.
+  async function finalizeTopUp(current: PayPalOrderResult, amt: number) {
+    let captured: PayPalOrderResult = { ...current, status: "UNCONFIRMED", simulated: true };
+    let captureFailed = false;
+    try {
+      captured = await capturePayPalOrder(current.id);
+    } catch {
+      captureFailed = true;
     }
-    setReceipt({ orderId: current.id, captureId: captured.captureId, simulated: current.simulated || captured.simulated, amountInr: amt });
-    toast.success(mode === "topup" ? "Money added to your PayPal wallet" : `Payment sent to ${payeeName.trim()}`, {
-      description:
-        current.simulated || captured.simulated
+    topUpWallet(amt, current.id, captured.captureId);
+    setReceipt({ kind: "topup", refId: current.id, captureId: captured.captureId, simulated: captured.simulated, amountInr: amt });
+    toast.success("Money added to your PayPal wallet", {
+      description: captureFailed
+        ? "The sandbox did not confirm the capture, but the top-up was registered as simulated."
+        : captured.simulated
           ? "Sandbox simulation — no real money moved."
-          : live
-            ? "Captured in live PayPal and recorded in your ledger."
-            : "Completed in the PayPal sandbox.",
+          : "Captured in the PayPal sandbox.",
     });
   }
 
@@ -160,24 +121,46 @@ export default function WalletPage() {
         toast.error("Enter a valid PayPal email.");
         return;
       }
-      if (amt > data.profile.walletBalance) {
-        toast.error("That's more than your PayPal balance. Add money first.");
+      if (amt > shownBalance) {
+        toast.error("That's more than your PayPal sandbox balance. Add money first.");
         return;
       }
     }
     setBusy(true);
     try {
-      const created = await createPayPalOrder({
-        amountInr: amt,
-        intent: "CAPTURE",
-        description: mode === "topup" ? "Wallet Guardian wallet top-up" : `Payment to ${payeeName.trim()}`,
-      });
-      if (created.approvalUrl && !created.simulated) {
-        setOrder(created);
-        toast.info(`Approve the order in ${envName}, then capture it here.`);
-        return;
+      if (mode === "topup") {
+        const created = await createPayPalOrder({
+          amountInr: amt,
+          intent: "CAPTURE",
+          description: "Wallet Guardian wallet top-up",
+        });
+        if (created.approvalUrl && !created.simulated) {
+          setOrder(created);
+          toast.info("Order created — approve it in the PayPal sandbox, then capture it here.");
+          return;
+        }
+        await finalizeTopUp(created, amt);
+      } else {
+        const res = await sendPayPalPayout({
+          email: payeeEmail.trim(),
+          name: payeeName.trim(),
+          amountInr: amt,
+          note: note.trim(),
+        });
+        // The payout request went to the sandbox; whatever it answered, the
+        // payment is registered and the balance debited. When the receiver's
+        // email belongs to another Wallet Guardian account, the server also
+        // queued an internal transfer for their client to collect.
+        payPerson({ amountInr: amt, name: payeeName.trim(), email: payeeEmail.trim(), note: note.trim(), batchId: res.batchId });
+        setReceipt({ kind: "pay", refId: res.batchId, simulated: res.simulated, amountInr: amt });
+        toast.success(`Payment sent to ${payeeName.trim()}`, {
+          description: res.internalTransfer
+            ? `${res.internalTransfer.toName} has a Wallet Guardian account — the amount lands in their wallet.`
+            : res.simulated
+              ? "Sandbox simulation — no real money moved."
+              : "Payout accepted by the PayPal sandbox.",
+        });
       }
-      await finalize(created, amt);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "The PayPal request failed.");
     } finally {
@@ -190,7 +173,7 @@ export default function WalletPage() {
     const amt = parseToInr(amount, currency);
     setBusy(true);
     try {
-      await finalize(order, amt);
+      await finalizeTopUp(order, amt);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Capture failed — approve the order in PayPal first.");
     } finally {
@@ -204,7 +187,7 @@ export default function WalletPage() {
     <div>
       <PageHeader
         title="Wallet & PayPal"
-        description={`Move money, pay people, and see every PayPal-linked transaction with its order and capture IDs — ${envName}.`}
+        description="Top-ups and payments call your own PayPal sandbox and are registered in your activity immediately — the balance moves with every registered transaction. If the receiver's email belongs to another Wallet Guardian account, the money lands in their wallet too."
         actions={
           <>
             <Button variant="outline" size="sm" onClick={() => openCheckout("topup")}><Plus /> Add money</Button>
@@ -219,18 +202,20 @@ export default function WalletPage() {
           <div className="pointer-events-none absolute -bottom-24 right-16 h-48 w-48 rounded-full bg-emerald-400/10 blur-2xl" aria-hidden />
           <div className="relative flex flex-wrap items-start justify-between gap-3">
             <div>
-              <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-white/70">PayPal wallet balance</p>
+              <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-white/70">PayPal sandbox balance</p>
               <p className="mt-1.5 text-[32px] font-semibold leading-none tracking-tight tabular sm:text-[38px]">
-                <Money value={data.profile.walletBalance} currency={currency} />
+                <Money value={shownBalance} currency={currency} />
               </p>
-              <p className="mt-2 text-[12px] text-white/70">{data.profile.email}</p>
+              <p className="mt-2 text-[12px] text-white/70">{balanceNote}</p>
             </div>
             <div className="flex flex-col items-end gap-1.5">
               <span className="inline-flex items-center gap-1.5 rounded-full bg-white/15 px-2.5 py-1 text-[10.5px] font-semibold backdrop-blur">
-                {live ? <ShieldCheck className="h-3 w-3" /> : <FlaskConical className="h-3 w-3" />}
-                {live ? "Live PayPal" : status.configured ? "Sandbox" : "Simulated"}
+                <FlaskConical className="h-3 w-3" />
+                {isDemo ? "Simulated" : status.configured ? "Live from PayPal sandbox" : "Simulation"}
               </span>
-              <span className="text-[10px] text-white/60">{live ? "Real money · approve each order" : "No real money moves"}</span>
+              <span className="text-[10px] text-white/60">
+                {isDemo ? "No real money moves" : `1 USD ≈ ${formatMoney(status.usdRate, currency, { decimals: false })}`}
+              </span>
             </div>
           </div>
           <div className="relative mt-6 flex flex-wrap gap-2">
@@ -255,7 +240,7 @@ export default function WalletPage() {
           <div className="flex items-center justify-between gap-2">
             <div className="flex items-center gap-2">
               <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary-soft text-primary">
-                {live ? <ShieldCheck className="h-4 w-4" /> : <FlaskConical className="h-4 w-4" />}
+                <FlaskConical className="h-4 w-4" />
               </span>
               <div>
                 <p className="text-[13px] font-semibold">PayPal connection</p>
@@ -267,303 +252,157 @@ export default function WalletPage() {
             </Button>
           </div>
           <div className="mt-4 space-y-2.5 text-[11.5px]">
-            {session?.provider !== "demo" && (
-              <>
-                <div className="flex items-center justify-between gap-2">
-                  <span className="text-muted-foreground">Account</span>
-                  <span className="max-w-[190px] truncate font-medium" title={session?.email}>{session?.email}</span>
-                </div>
-                {session?.payerId && (
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="text-muted-foreground">Payer ID</span>
-                    <span className="max-w-[150px] truncate font-mono text-[10.5px]" title={session.payerId}>
-                      {session.payerId}
-                    </span>
-                  </div>
-                )}
-              </>
+            {!isDemo && (
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-muted-foreground">Account</span>
+                <span className="max-w-[190px] truncate font-medium" title={session?.email}>{session?.email}</span>
+              </div>
             )}
             <div className="flex items-center justify-between gap-2">
               <span className="text-muted-foreground">Mode</span>
-              <Badge variant={live || status.configured ? "success" : "warning"}>
-                {live ? "Live account connected" : status.configured ? "Sandbox keys connected" : "Simulation"}
+              <Badge variant={status.configured && !isDemo ? "success" : "warning"}>
+                {isDemo ? "Simulation" : status.source === "user" ? "Your sandbox keys" : status.configured ? "Sandbox keys connected" : "Simulation"}
               </Badge>
             </div>
             <div className="flex items-center justify-between gap-2">
-              <span className="text-muted-foreground">Client ID</span>
-              <span className="max-w-[150px] truncate font-mono text-[10.5px]" title={status.clientId ?? undefined}>
-                {status.clientId ? `${status.clientId.slice(0, 10)}…` : "not configured"}
-              </span>
-            </div>
-            <div className="flex items-center justify-between gap-2">
               <span className="text-muted-foreground">Payouts</span>
-              <span className="font-medium">{status.payoutsEnabled ? "Enabled" : live ? "Not enabled" : "Simulated fallback"}</span>
+              <span className="font-medium">{status.payoutsEnabled ? "Enabled" : "Simulated fallback"}</span>
             </div>
             <div className="flex items-center justify-between gap-2">
               <span className="text-muted-foreground">Environment</span>
-              <span className="font-medium">{live ? "api-m.paypal.com" : "api-m.sandbox"}</span>
+              <span className="font-medium">api-m.sandbox</span>
             </div>
           </div>
           <div className="mt-auto space-y-2 pt-4">
             <InfoNote className="text-[11px]">
-              {live
-                ? "Orders charge the PayPal account you signed in with, and each one needs your approval. Business payouts and invoices only work for the allowlisted business account. Secret keys never reach the browser."
-                : status.configured
-                  ? "The demo calls the PayPal sandbox from the server. Secret keys never reach the browser."
-                  : "No sandbox credentials detected, so every demo transfer is simulated and clearly labelled. Add sandbox keys to use the sandbox API."}
+              {isDemo
+                ? "The demo workspace shares the server's sandbox account, and its extra movements are labelled simulations."
+                : status.source === "user"
+                  ? "Your own sandbox credentials are attached to this account — added at onboarding, stored encrypted on the server, and they can never be changed or removed. Secret keys never reach the browser."
+                  : "No sandbox credentials are attached to this account yet — transfers run as labelled simulations. Connect them during onboarding; they attach permanently."}
             </InfoNote>
-            {session?.provider !== "demo" && (
-              <p className="text-[10px] leading-relaxed text-muted-foreground">
-                Balance and activity here are your local ledger. PayPal does not share a personal account's balance or transaction history with this app.
-              </p>
-            )}
           </div>
         </Card>
       </div>
 
       <div className="mt-3 grid gap-3 sm:grid-cols-3">
         {[
-          { label: "Bank balance", value: bank?.balance ?? 0, sub: bank?.name ?? "No bank linked", icon: Landmark, tone: "text-foreground" },
-          { label: "Card balance", value: card?.balance ?? 0, sub: card?.name ?? "No card linked", icon: CreditCard, tone: (card?.balance ?? 0) < 0 ? "text-danger" : "text-foreground" },
-          { label: "Active autopays", value: upcomingAutopay, sub: upcomingAutopay ? "Scheduled PayPal payouts" : "Nothing scheduled", icon: CalendarClock, tone: "text-foreground", money: false },
+          {
+            label: "Wallet balance",
+            value: formatMoney(shownBalance, currency),
+            sub: isDemo ? "Simulated demo workspace" : "Opening credit + registered transactions",
+            icon: Wallet,
+          },
+          {
+            label: "Active autopays",
+            value: String(upcomingAutopay),
+            sub: upcomingAutopay ? "Scheduled PayPal payouts" : "Nothing scheduled",
+            icon: CalendarClock,
+          },
+          {
+            label: "This month via PayPal",
+            value: monthIn + monthOut > 0 ? formatMoney(monthIn - monthOut, currency, { signed: true }) : formatMoney(0, currency),
+            sub: monthIn + monthOut > 0 ? `+${formatMoney(monthIn, currency)} in · −${formatMoney(monthOut, currency)} out` : "No sandbox activity yet",
+            icon: ArrowUpRight,
+          },
         ].map((stat) => (
           <Card key={stat.label} className="flex items-center gap-3 p-4">
             <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-muted/70 text-muted-foreground"><stat.icon className="h-4 w-4" /></span>
             <div className="min-w-0">
               <p className="text-[10.5px] font-medium uppercase tracking-wider text-muted-foreground">{stat.label}</p>
-              <p className={cn("mt-0.5 text-[17px] font-semibold tabular", stat.tone)}>
-                {stat.money === false ? stat.value : <Money value={stat.value} currency={currency} />}
-              </p>
+              <p className="mt-0.5 text-[17px] font-semibold tabular">{stat.value}</p>
               <p className="truncate text-[10.5px] text-muted-foreground">{stat.sub}</p>
             </div>
           </Card>
         ))}
       </div>
 
-      {canReport && (
-        <Card className="mt-4">
-          <CardHeader className="flex-row flex-wrap items-center justify-between gap-3">
-            <div className="flex items-center gap-2">
-              <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-indigo-100 text-indigo-700 dark:bg-indigo-500/15 dark:text-indigo-300">
-                <Building2 className="h-3.5 w-3.5" />
-              </span>
-              <div>
-                <CardTitle>PayPal business account</CardTitle>
-                <p className="text-[11px] text-muted-foreground">Reporting API · last 30 days · app credentials</p>
-              </div>
+      <Card className="mt-4">
+        <CardHeader className="flex-row flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-2">
+            <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-primary-soft text-primary"><Wallet className="h-3.5 w-3.5" /></span>
+            <div>
+              <CardTitle>PayPal activity</CardTitle>
+              <p className="text-[11px] text-muted-foreground">Top-ups, payments and autopay runs registered from this wallet</p>
             </div>
-            <div className="flex items-center gap-2">
-              <Badge variant="outline">{report?.env === "live" ? "Live" : "Sandbox"}</Badge>
-              <Button variant="ghost" size="icon-sm" onClick={loadReport} disabled={reportLoading} aria-label="Refresh business reporting">
-                {reportLoading ? <Spinner /> : <RefreshCw className="h-3.5 w-3.5" />}
-              </Button>
-            </div>
-          </CardHeader>
-          <CardContent>
-            {reportError ? (
-              <div className="rounded-xl border border-amber-200 bg-amber-50/70 p-3 text-[11.5px] leading-relaxed text-amber-900 dark:border-amber-400/20 dark:bg-amber-500/10 dark:text-amber-200">
-                {reportError}
-              </div>
-            ) : !report ? (
-              <div className="flex items-center gap-2 text-[11.5px] text-muted-foreground">
-                <Spinner /> Reading balances and transactions…
-              </div>
-            ) : (
-              <div className="grid gap-4 lg:grid-cols-5">
-                <div className="space-y-2 lg:col-span-2">
-                  {report.balances.length === 0 && (
-                    <p className="text-[11.5px] text-muted-foreground">PayPal returned no balances for this account.</p>
-                  )}
-                  {report.balances.map((balance) => (
-                    <div key={balance.currency} className="rounded-xl border border-border/70 bg-muted/20 p-3">
-                      <div className="flex items-center justify-between gap-2">
-                        <span className="text-[10.5px] font-semibold uppercase tracking-wider text-muted-foreground">
-                          {balance.currency} balance
-                        </span>
-                        <Badge variant="secondary">{balance.currency}</Badge>
+          </div>
+          <div className="flex gap-1 rounded-xl bg-muted/50 p-1">
+            {([
+              ["all", "All"],
+              ["topup", "Top-ups"],
+              ["payment", "Payments"],
+            ] as const).map(([key, label]) => (
+              <button
+                key={key}
+                type="button"
+                onClick={() => setFilter(key)}
+                aria-pressed={filter === key}
+                className={cn(
+                  "rounded-lg px-2.5 py-1.5 text-[11.5px] font-semibold transition-colors",
+                  filter === key ? "bg-card text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground",
+                )}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+        </CardHeader>
+        <CardContent>
+          {filteredTx.length === 0 ? (
+            <EmptyState
+              icon={<Wallet />}
+              title={filter === "all" ? "No PayPal activity yet" : filter === "topup" ? "No top-ups yet" : "No payments yet"}
+              description="Top-ups, payments and autopay runs appear here the moment they are registered — no waiting on PayPal reporting."
+              action={<Button size="sm" onClick={() => openCheckout(filter === "topup" ? "topup" : "pay")}><Plus /> {filter === "topup" ? "Add money" : "Send a payment"}</Button>}
+              className="py-8"
+            />
+          ) : (
+            <div className="divide-y divide-border/60">
+              {filteredTx.map((tx) => {
+                const incoming = tx.type === "income";
+                const simulated = isSimulatedId(tx.paypalOrderId) || isSimulatedId(tx.paypalCaptureId);
+                return (
+                  <div key={tx.id} className="flex items-start gap-3 py-3 first:pt-0 last:pb-0">
+                    <span className={cn(
+                      "mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg",
+                      incoming ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300" : "bg-muted/80 text-muted-foreground",
+                    )}>
+                      {incoming ? <ArrowDownLeft className="h-3.5 w-3.5" /> : <ArrowUpRight className="h-3.5 w-3.5" />}
+                    </span>
+                    <div className="min-w-0 flex-1">
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <p className="truncate text-[12.5px] font-semibold">{tx.merchant}</p>
+                        <Badge variant={simulated ? "secondary" : "success"}>{simulated ? "Simulated" : "Sandbox"}</Badge>
+                        {tx.needsInfo && <Badge variant="outline">Needs info</Badge>}
                       </div>
-                      <p className="mt-1 text-[18px] font-semibold tabular">{formatNative(balance.total, balance.currency)}</p>
-                      <p className="mt-1 text-[10.5px] text-muted-foreground tabular">
-                        Available {formatNative(balance.available, balance.currency)}
-                        {balance.withheld > 0 ? ` · Withheld ${formatNative(balance.withheld, balance.currency)}` : ""}
+                      <p className="mt-0.5 text-[11px] text-muted-foreground">
+                        {fmtDate(tx.date, "d MMM yyyy")}
+                        {tx.source === "autopay" ? " · Autopay payout" : incoming ? " · Wallet top-up" : " · PayPal payment"}
+                      </p>
+                      <p className="mt-0.5 truncate font-mono text-[10px] text-muted-foreground/80">
+                        order {tx.paypalOrderId ?? "—"}
+                        {tx.paypalCaptureId ? ` · capture ${tx.paypalCaptureId}` : ""}
                       </p>
                     </div>
-                  ))}
-                  {report.accountId && (
-                    <p className="truncate font-mono text-[10px] text-muted-foreground">account {report.accountId}</p>
-                  )}
-                </div>
-                <div className="lg:col-span-3">
-                  <div className="flex items-center justify-between gap-2">
-                    <p className="text-[11.5px] font-semibold">Recent transactions</p>
-                    <span className="text-[10.5px] text-muted-foreground">{report.totalTransactions} total</span>
-                  </div>
-                  {report.transactions.length === 0 ? (
-                    <p className="mt-2 text-[11.5px] text-muted-foreground">
-                      No transactions in {report.range.start} → {report.range.end}. Transaction Search can lag by a few hours.
-                    </p>
-                  ) : (
-                    <div className="mt-1 divide-y divide-border/60">
-                      {report.transactions.slice(0, 8).map((tx) => (
-                        <div key={tx.id} className="flex items-start gap-3 py-2.5 first:pt-1 last:pb-0">
-                          <span className={cn(
-                            "mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-lg",
-                            tx.outgoing ? "bg-muted/80 text-muted-foreground" : "bg-emerald-100 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300",
-                          )}>
-                            {tx.outgoing ? <ArrowUpRight className="h-3 w-3" /> : <ArrowDownLeft className="h-3 w-3" />}
-                          </span>
-                          <div className="min-w-0 flex-1">
-                            <p className="truncate text-[12px] font-semibold">{tx.subject || tx.payerName || "PayPal transaction"}</p>
-                            <p className="truncate text-[10.5px] text-muted-foreground">
-                              {tx.date ? fmtDate(tx.date.slice(0, 10), "d MMM yyyy") : "—"}
-                              {tx.payerEmail ? ` · ${tx.payerEmail}` : ""} · {tx.status || tx.eventCode}
-                            </p>
-                          </div>
-                          <span className={cn("text-[12px] font-semibold tabular", tx.outgoing ? "text-foreground" : "text-success")}>
-                            {tx.outgoing ? "−" : "+"}
-                            {formatNative(Math.abs(tx.amount), tx.currency)}
-                          </span>
-                        </div>
-                      ))}
+                    <div className="text-right">
+                      <Money
+                        value={incoming ? tx.amount : -tx.amount}
+                        currency={currency}
+                        signed
+                        className={cn("text-[13px] font-semibold", incoming ? "text-success" : "text-foreground")}
+                      />
+                      <p className="text-[10px] text-muted-foreground">{incoming ? "In" : "Out"}</p>
                     </div>
-                  )}
-                </div>
-              </div>
-            )}
-            <p className="mt-3 text-[10.5px] leading-relaxed text-muted-foreground">
-              Business reporting uses the server's app credentials and reads the PayPal business account that owns this app — not the
-              personal account you signed in with. It is read-only and never merged into your Wallet Guardian ledger.
-            </p>
-          </CardContent>
-        </Card>
-      )}
-
-      <div className="mt-4 grid gap-4 lg:grid-cols-3">
-        <Card className="lg:col-span-1">
-          <CardHeader className="flex-row items-center justify-between">
-            <div className="flex items-center gap-2">
-              <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-primary-soft text-primary"><Wallet className="h-3.5 w-3.5" /></span>
-              <CardTitle>Linked accounts</CardTitle>
-            </div>
-            <Badge variant="outline"><ArrowRightLeft /> Local ledger</Badge>
-          </CardHeader>
-          <CardContent className="space-y-1">
-            {data.accounts.map((account) => {
-              const meta = ACCOUNT_META[account.type];
-              const Icon = meta.icon;
-              return (
-                <div key={account.id} className="flex items-center gap-3 rounded-xl px-2 py-2.5 transition-colors hover:bg-muted/40">
-                  <span className={cn(
-                    "flex h-9 w-9 shrink-0 items-center justify-center rounded-xl",
-                    account.type === "paypal" ? "bg-indigo-100 text-indigo-700 dark:bg-indigo-500/15 dark:text-indigo-300" : "bg-muted/80 text-muted-foreground",
-                  )}>
-                    <Icon className="h-4 w-4" />
-                  </span>
-                  <div className="min-w-0 flex-1">
-                    <p className="truncate text-[12.5px] font-semibold">{account.name}</p>
-                    <p className="text-[10.5px] text-muted-foreground">{meta.label}</p>
                   </div>
-                  <Money value={account.balance} currency={currency} signed={account.balance < 0} className={cn("text-[13px] font-semibold", account.balance < 0 && "text-danger")} />
-                </div>
-              );
-            })}
-            <div className="pt-2">
-              <Button variant="soft" size="sm" className="w-full justify-center" onClick={() => openCheckout("topup")}>
-                <Plus /> Top up PayPal wallet
-              </Button>
+                );
+              })}
             </div>
-            <p className="px-2 pt-2 text-[10.5px] leading-relaxed text-muted-foreground">
-              Bank and card rows are part of this demo profile. Top-ups, payments and autopay runs change the PayPal balance.
-            </p>
-          </CardContent>
-        </Card>
-
-        <Card className="lg:col-span-2">
-          <CardHeader className="flex-row flex-wrap items-center justify-between gap-3">
-            <div className="flex items-center gap-2">
-              <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-primary-soft text-primary"><ArrowRightLeft className="h-3.5 w-3.5" /></span>
-              <div>
-                <CardTitle>PayPal activity</CardTitle>
-                <p className="text-[11px] text-muted-foreground">Top-ups and payments with PayPal references</p>
-              </div>
-            </div>
-            <div className="flex gap-1 rounded-xl bg-muted/50 p-1">
-              {([
-                ["all", "All"],
-                ["topup", "Top-ups"],
-                ["payment", "Payments"],
-              ] as const).map(([key, label]) => (
-                <button
-                  key={key}
-                  type="button"
-                  onClick={() => setFilter(key)}
-                  aria-pressed={filter === key}
-                  className={cn(
-                    "rounded-lg px-2.5 py-1.5 text-[11.5px] font-semibold transition-colors",
-                    filter === key ? "bg-card text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground",
-                  )}
-                >
-                  {label}
-                </button>
-              ))}
-            </div>
-          </CardHeader>
-          <CardContent>
-            {filteredTx.length === 0 ? (
-              <EmptyState
-                icon={<ArrowRightLeft />}
-                title={filter === "all" ? "No PayPal activity yet" : filter === "topup" ? "No top-ups yet" : "No payments yet"}
-                description="Add money or pay someone to see the order and capture IDs recorded here."
-                action={<Button size="sm" onClick={() => openCheckout(filter === "topup" ? "topup" : "pay")}><Plus /> {filter === "topup" ? "Add money" : "Send a payment"}</Button>}
-                className="py-8"
-              />
-            ) : (
-              <div className="divide-y divide-border/60">
-                {filteredTx.map((tx) => {
-                  const topup = !!tx.transfer;
-                  const simulated = isSimulatedId(tx.paypalOrderId) || isSimulatedId(tx.paypalCaptureId);
-                  return (
-                    <div key={tx.id} className="flex items-start gap-3 py-3 first:pt-0 last:pb-0">
-                      <span className={cn(
-                        "mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg",
-                        topup ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300" : "bg-muted/80 text-muted-foreground",
-                      )}>
-                        {topup ? <ArrowDownLeft className="h-3.5 w-3.5" /> : <ArrowUpRight className="h-3.5 w-3.5" />}
-                      </span>
-                      <div className="min-w-0 flex-1">
-                        <div className="flex flex-wrap items-center gap-1.5">
-                          <p className="truncate text-[12.5px] font-semibold">{tx.merchant}</p>
-                          <Badge variant={simulated ? "secondary" : "success"}>{simulated ? "Simulated" : live ? "Live" : "Sandbox"}</Badge>
-                        </div>
-                        <p className="mt-0.5 text-[11px] text-muted-foreground">
-                          {fmtDate(tx.date, "d MMM yyyy")}
-                          {tx.source === "autopay" ? " · Autopay payout" : topup ? " · Wallet top-up" : " · PayPal payment"}
-                        </p>
-                        <p className="mt-0.5 truncate font-mono text-[10px] text-muted-foreground/80">
-                          order {tx.paypalOrderId ?? "—"}
-                          {tx.paypalCaptureId ? ` · capture ${tx.paypalCaptureId}` : ""}
-                        </p>
-                      </div>
-                      <div className="text-right">
-                        <Money
-                          value={topup ? tx.amount : -tx.amount}
-                          currency={currency}
-                          signed
-                          className={cn("text-[13px] font-semibold", topup ? "text-success" : "text-foreground")}
-                        />
-                        <p className="text-[10px] text-muted-foreground">{topup ? "In" : "Out"}</p>
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-          </CardContent>
-        </Card>
-      </div>
+          )}
+        </CardContent>
+      </Card>
 
       <div className="mt-4 grid gap-3 sm:grid-cols-2">
-        <Link to="/app/autopay" className="group flex items-center gap-3 rounded-2xl border border-border/80 bg-card p-4 shadow-soft transition-colors hover:border-primary/30">
+        <Link to="/app/flows/autopay" className="group flex items-center gap-3 rounded-2xl border border-border/80 bg-card p-4 shadow-soft transition-colors hover:border-primary/30">
           <span className="flex h-9 w-9 items-center justify-center rounded-xl bg-primary-soft text-primary"><CalendarClock className="h-4 w-4" /></span>
           <span className="min-w-0 flex-1">
             <span className="block text-[12.5px] font-semibold">Automate a payment</span>
@@ -582,26 +421,21 @@ export default function WalletPage() {
       </div>
 
       <InfoNote className="mt-4" icon={<Sparkles />}>
-        {live
-          ? "Signed in with PayPal: orders, captures and payouts run against live PayPal for your account, and each order still needs your approval on PayPal. Top-ups are transfers and stay out of income analytics."
-          : "Demo mode: orders, captures and payouts target PayPal's sandbox and are simulated when credentials aren't configured. Top-ups are transfers and stay out of income analytics."}{" "}
-        Suggestions are not financial advice.
+        Every top-up credits and every payment debits your wallet the moment it is registered — no reporting lag, no sync.
+        Payments to an email that belongs to another Wallet Guardian account also credit that account's wallet. Simulated runs
+        are always labelled. Suggestions are not financial advice.
       </InfoNote>
 
       <Dialog open={!!mode} onOpenChange={(open) => !open && closeCheckout()}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>{receipt ? (mode === "topup" ? "Money added" : "Payment sent") : dialogTitle}</DialogTitle>
+            <DialogTitle>{receipt ? (receipt.kind === "topup" ? "Money added" : "Payment sent") : dialogTitle}</DialogTitle>
             <DialogDescription>
               {receipt
-                ? "Here's the PayPal receipt. It's already reflected in your local ledger."
+                ? "Registered in your activity and the balance immediately."
                 : mode === "topup"
-                  ? live
-                    ? "Bring money into your Wallet Guardian ledger after approving the order on PayPal."
-                    : "Pull sandbox money into your PayPal wallet. Nothing leaves the demo environment."
-                  : live
-                    ? "Send a real payment to a PayPal email. You approve the amount on PayPal before anything is charged."
-                    : "Send sandbox money to a PayPal email. Your PayPal wallet balance is debited."}
+                  ? "Create an order in your PayPal sandbox, then capture it. The top-up is registered — and the balance credited — the moment you capture, whatever the sandbox answers."
+                  : "Send sandbox money to a PayPal email. The payment is registered — and the balance debited — whatever the sandbox answers. Wallet Guardian accounts get credited directly."}
             </DialogDescription>
           </DialogHeader>
 
@@ -610,42 +444,44 @@ export default function WalletPage() {
               <div className="flex items-center gap-3 rounded-xl border border-border/70 bg-muted/30 p-3.5">
                 <span className="flex h-10 w-10 items-center justify-center rounded-full bg-emerald-100 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300"><CheckCircle2 className="h-5 w-5" /></span>
                 <div>
-                  <p className="text-[13px] font-semibold">{mode === "topup" ? "Wallet top-up" : `Payment to ${payeeName || "payee"}`}</p>
-                  <p className="text-[11px] text-muted-foreground">{formatMoney(receipt.amountInr, currency)} · {receipt.simulated ? "Simulated" : live ? "Live PayPal" : "PayPal sandbox"}</p>
+                  <p className="text-[13px] font-semibold">{receipt.kind === "topup" ? "Wallet top-up" : `Payment to ${payeeName || "payee"}`}</p>
+                  <p className="text-[11px] text-muted-foreground">{formatMoney(receipt.amountInr, currency)} · {receipt.simulated ? "Simulated" : "PayPal sandbox"}</p>
                 </div>
               </div>
               <dl className="space-y-2 rounded-xl border border-border/70 p-3.5 text-[11.5px]">
                 <div className="flex justify-between gap-3">
-                  <dt className="text-muted-foreground">Order ID</dt>
-                  <dd className="truncate font-mono text-[10.5px]">{receipt.orderId}</dd>
+                  <dt className="text-muted-foreground">{receipt.kind === "topup" ? "Order ID" : "Payout batch"}</dt>
+                  <dd className="truncate font-mono text-[10.5px]">{receipt.refId}</dd>
                 </div>
+                {receipt.kind === "topup" && (
+                  <div className="flex justify-between gap-3">
+                    <dt className="text-muted-foreground">Capture ID</dt>
+                    <dd className="truncate font-mono text-[10.5px]">{receipt.captureId ?? "—"}</dd>
+                  </div>
+                )}
                 <div className="flex justify-between gap-3">
-                  <dt className="text-muted-foreground">Capture ID</dt>
-                  <dd className="truncate font-mono text-[10.5px]">{receipt.captureId ?? "—"}</dd>
-                </div>
-                <div className="flex justify-between gap-3">
-                  <dt className="text-muted-foreground">New wallet balance</dt>
-                  <dd className="font-semibold tabular"><Money value={data.profile.walletBalance} currency={currency} /></dd>
+                  <dt className="text-muted-foreground">Wallet balance now</dt>
+                  <dd className="font-semibold tabular"><Money value={shownBalance} currency={currency} /></dd>
                 </div>
               </dl>
               <p className="text-[10.5px] leading-relaxed text-muted-foreground">
                 {receipt.simulated
-                  ? "No PayPal credentials were configured, so this run was simulated. Add sandbox keys on the server to call the real API."
-                  : live
-                    ? "Completed against live PayPal. The amount was charged only after you approved the order."
-                    : "Completed against the PayPal sandbox. No real money moved."}
+                  ? "The sandbox could not confirm this movement, so it was registered as a labelled simulation."
+                  : "Completed against the PayPal sandbox and registered immediately."}
               </p>
             </div>
           ) : order && !receipt ? (
             <div className="space-y-3">
               <div className="rounded-xl border border-amber-200 bg-amber-50/70 p-3.5 text-[11.5px] leading-relaxed text-amber-900 dark:border-amber-400/20 dark:bg-amber-500/10 dark:text-amber-200">
-                The order was created in {envName}. Approve it in PayPal, then come back and capture it. Order <span className="font-mono text-[10.5px]">{order.id}</span>.
+                Order <span className="font-mono text-[10.5px]">{order.id}</span> was created in the PayPal sandbox. For a real
+                capture, sign in at sandbox.paypal.com with a sandbox payer account and approve it first. Whenever you're ready,
+                press capture — the top-up registers and the balance updates no matter what the sandbox answers.
               </div>
               <div className="flex flex-col gap-2">
                 {order.approvalUrl && (
                   <Button variant="outline" asChild className="justify-center">
                     <a href={order.approvalUrl} target="_blank" rel="noreferrer">
-                      <ExternalLink /> {live ? "Approve in PayPal" : "Approve in PayPal sandbox"}
+                      <ExternalLink /> Approve in PayPal sandbox
                     </a>
                   </Button>
                 )}
@@ -677,7 +513,7 @@ export default function WalletPage() {
                   </div>
                 ) : (
                   <p className="pt-0.5 text-[10.5px] text-muted-foreground">
-                    Available: <span className="font-semibold text-foreground"><Money value={data.profile.walletBalance} currency={currency} /></span>
+                    Sandbox balance: <span className="font-semibold text-foreground"><Money value={shownBalance} currency={currency} /></span>
                   </p>
                 )}
               </div>
@@ -702,10 +538,12 @@ export default function WalletPage() {
               )}
 
               <div className="flex items-center gap-1.5 rounded-xl border border-border/60 bg-muted/20 px-3 py-2 text-[10.5px] text-muted-foreground">
-                {live ? <ShieldCheck className="h-3 w-3 shrink-0" /> : <FlaskConical className="h-3 w-3 shrink-0" />}
-                {live
-                  ? "Live PayPal — you approve the exact amount on PayPal before it is charged."
-                  : `Sandbox only — no real money moves. ${status.configured ? "Using the server's sandbox credentials." : "Credentials aren't configured, so this will be simulated."}`}
+                <FlaskConical className="h-3 w-3 shrink-0" />
+                {isDemo
+                  ? "Demo workspace — this transfer is a labelled simulation."
+                  : status.configured
+                    ? "Sandbox only — this calls your own PayPal sandbox from the server. No real money moves."
+                    : "No sandbox credentials attached — the request still runs and registers as a labelled simulation."}
               </div>
             </div>
           )}
@@ -718,9 +556,9 @@ export default function WalletPage() {
             ) : (
               <>
                 <Button variant="outline" onClick={closeCheckout} disabled={busy}>Cancel</Button>
-                <Button onClick={submit} disabled={busy}>
+                <Button onClick={() => void submit()} disabled={busy}>
                   {busy ? <Spinner /> : mode === "topup" ? <Plus /> : <ArrowUpRight />}
-                  {busy ? "Contacting PayPal…" : mode === "topup" ? "Add money" : "Send payment"}
+                  {busy ? "Contacting PayPal…" : mode === "topup" ? "Create order" : "Send payment"}
                 </Button>
               </>
             )}

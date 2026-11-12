@@ -1,12 +1,6 @@
-import { createContext, useCallback, useContext, useMemo, useState, type ReactNode } from "react";
-
-type QuickAddType = "expense" | "income";
+import { createContext, useContext, useMemo, useState, type ReactNode } from "react";
 
 interface UIContextValue {
-  quickAddOpen: boolean;
-  quickAddType: QuickAddType;
-  openQuickAdd: (type?: QuickAddType) => void;
-  closeQuickAdd: () => void;
   paletteOpen: boolean;
   setPaletteOpen: (open: boolean) => void;
 }
@@ -14,20 +8,8 @@ interface UIContextValue {
 const UIContext = createContext<UIContextValue | null>(null);
 
 export function UIProvider({ children }: { children: ReactNode }) {
-  const [quickAddOpen, setQuickAddOpen] = useState(false);
-  const [quickAddType, setQuickAddType] = useState<QuickAddType>("expense");
   const [paletteOpen, setPaletteOpen] = useState(false);
-
-  const openQuickAdd = useCallback((type: QuickAddType = "expense") => {
-    setQuickAddType(type);
-    setQuickAddOpen(true);
-  }, []);
-  const closeQuickAdd = useCallback(() => setQuickAddOpen(false), []);
-
-  const value = useMemo(
-    () => ({ quickAddOpen, quickAddType, openQuickAdd, closeQuickAdd, paletteOpen, setPaletteOpen }),
-    [quickAddOpen, quickAddType, openQuickAdd, closeQuickAdd, paletteOpen],
-  );
+  const value = useMemo(() => ({ paletteOpen, setPaletteOpen }), [paletteOpen]);
 
   return <UIContext.Provider value={value}>{children}</UIContext.Provider>;
 }

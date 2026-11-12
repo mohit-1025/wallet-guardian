@@ -5,7 +5,6 @@ import {
 } from "lucide-react";
 import { Area, AreaChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { useApp, useAppData } from "@/lib/app-context";
-import { useUI } from "@/components/layout/ui-context";
 import { formatMoney, formatCompact } from "@/lib/money";
 import { Money } from "@/components/ui/money";
 import { Button } from "@/components/ui/button";
@@ -31,7 +30,6 @@ const severityMeta = {
 export default function DashboardPage() {
   const data = useAppData();
   const { loadSample } = useApp();
-  const { openQuickAdd } = useUI();
   const currency = data.profile.currency;
   const month = monthKey();
   const snap = budgetSnapshot(data, month);
@@ -44,7 +42,9 @@ export default function DashboardPage() {
   const goals = data.goals.slice(0, 2);
   const series = incomeExpenseSeries(data.transactions, 6);
   const hasTrend = series.some((p) => p.income > 0 || p.expenses > 0);
-  const totalBalance = data.accounts.reduce((s, a) => s + a.balance, 0);
+  // One balance everywhere: the wallet balance that Wallet & PayPal and
+  // Transactions move with every registered row.
+  const totalBalance = data.profile.walletBalance;
 
   const prevKey = previousMonthKey(month);
   const prevDay = Math.min(dayOfMonth(), 28);
@@ -80,10 +80,9 @@ export default function DashboardPage() {
         title={`${greeting}, ${firstName}`}
         description={guardianDailyLine(data, currency)}
         actions={
-          <>
-            <Button variant="outline" onClick={() => openQuickAdd("income")} className="hidden sm:inline-flex"><ArrowDownLeft /> Add income</Button>
-            <Button onClick={() => openQuickAdd("expense")}><ArrowUpRight /> Add expense</Button>
-          </>
+          <Button variant="outline" asChild>
+            <Link to="/app/transactions"><ReceiptText /> View activity</Link>
+          </Button>
         }
       />
 
@@ -92,10 +91,10 @@ export default function DashboardPage() {
           <EmptyState
             icon={<Wallet />}
             title="Your guardian is ready for its first record"
-            description="Add income and a few expenses to unlock envelopes, safe-to-spend and grounded insights. Or load the sample storyline to explore."
+            description="Transactions are fetched automatically from your connected PayPal account — incoming and outgoing, with categories. Check the connection in Wallet & PayPal, or load the sample storyline to explore."
             action={
               <div className="flex flex-wrap justify-center gap-2">
-                <Button onClick={() => openQuickAdd("expense")}><ArrowUpRight /> Add an expense</Button>
+                <Button asChild><Link to="/app/wallet"><ReceiptText /> Open Wallet &amp; PayPal</Link></Button>
                 <Button variant="outline" onClick={() => loadSample()}><Sparkles /> Load sample data</Button>
               </div>
             }
@@ -111,11 +110,11 @@ export default function DashboardPage() {
           <div className="relative p-5 sm:p-6">
             <div className="flex items-start justify-between">
               <div>
-                <p className="text-[11px] font-medium uppercase tracking-[0.14em] text-indigo-200">Net balance</p>
+                <p className="text-[11px] font-medium uppercase tracking-[0.14em] text-indigo-200">Wallet balance</p>
                 <p className="mt-2 text-[2rem] font-semibold leading-none tracking-tight tabular">
                   <Money value={totalBalance} currency={currency} />
                 </p>
-                <p className="mt-2 text-[11.5px] text-indigo-200/80">Across wallet, bank and card</p>
+                <p className="mt-2 text-[11.5px] text-indigo-200/80">Matches Wallet &amp; PayPal and Transactions</p>
               </div>
               <span className="flex h-9 w-9 items-center justify-center rounded-xl bg-white/10 ring-1 ring-white/15">
                 <Wallet className="h-4 w-4 text-indigo-100" />
@@ -268,11 +267,8 @@ export default function DashboardPage() {
                 </span>
                 <p className="mt-3 text-[13px] font-semibold">No activity to chart yet</p>
                 <p className="mt-1 max-w-[240px] text-[11.5px] leading-relaxed text-muted-foreground">
-                  Your six-month income and expense trend appears after your first records.
+                  Your six-month income and expense trend appears once PayPal activity arrives.
                 </p>
-                <Button variant="outline" size="sm" className="mt-3" onClick={() => openQuickAdd("expense")}>
-                  <ArrowUpRight /> Add a transaction
-                </Button>
               </div>
             )}
           </CardContent>
@@ -328,7 +324,7 @@ export default function DashboardPage() {
         <Card className="md:col-span-6">
           <CardHeader className="flex-row items-center justify-between">
             <CardTitle>Upcoming bills & reminders</CardTitle>
-            <Link to="/app/bills" className="text-[11.5px] font-semibold text-primary hover:underline">View all</Link>
+            <Link to="/app/flows/bills" className="text-[11.5px] font-semibold text-primary hover:underline">View all</Link>
           </CardHeader>
           <CardContent className="space-y-2">
             {bills.length === 0 && reminders.length === 0 ? (
@@ -340,7 +336,7 @@ export default function DashboardPage() {
             ) : (
               <>
                 {bills.map((b) => (
-                  <Link key={b.id} to="/app/bills" className="flex items-center gap-3 rounded-xl border border-border/70 bg-card px-3 py-2.5 transition-colors hover:border-primary/30 hover:bg-muted/30">
+                  <Link key={b.id} to="/app/flows/bills" className="flex items-center gap-3 rounded-xl border border-border/70 bg-card px-3 py-2.5 transition-colors hover:border-primary/30 hover:bg-muted/30">
                     <span className={cn("flex h-9 w-9 shrink-0 flex-col items-center justify-center rounded-lg text-[9px] font-bold uppercase leading-none", b.derivedStatus === "overdue" ? "bg-danger-soft text-danger" : b.derivedStatus === "due" ? "bg-warning-soft text-warning" : "bg-muted text-muted-foreground")}>
                       <span className="text-[12px]">{b.dueDate.slice(8, 10)}</span>
                       {fmtDate(b.dueDate, "MMM")}
@@ -424,7 +420,7 @@ export default function DashboardPage() {
 
       <div className="mt-4 grid gap-3 sm:grid-cols-3">
         {[
-          { to: "/app/subscriptions", icon: ReceiptText, title: "Subscriptions", stat: `${data.subscriptions.filter((s) => s.status === "active").length} active`, sub: "Find duplicates and waste" },
+          { to: "/app/flows/subscriptions", icon: ReceiptText, title: "Subscriptions", stat: `${data.subscriptions.filter((s) => s.status === "active").length} active`, sub: "Find duplicates and waste" },
           { to: "/app/reminders", icon: BellRing, title: "Reminders", stat: `${data.reminders.filter((r) => r.status === "open").length} open`, sub: "Who owes whom, settled" },
           { to: "/app/shopper", icon: Sparkles, title: "Smart Shopper", stat: "Compare 5 sellers", sub: "Trust-weighted best pick" },
         ].map((c) => (

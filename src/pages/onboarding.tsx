@@ -1,15 +1,18 @@
 import { useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import {
-  ArrowLeft, ArrowRight, Briefcase, Check, GraduationCap, Home, Landmark, Loader2,
-  Plus, ShieldCheck, Sparkles, Target, Trash2, TrendingUp, Wallet, Zap,
+  ArrowLeft, ArrowRight, Briefcase, Check, CircleDot, FlaskConical, GraduationCap, HeartPulse,
+  Home, KeyRound, Landmark, Loader2, Plus, RefreshCw, ShieldCheck, Sparkles, Target, Trash2,
+  TrendingUp, Zap,
 } from "lucide-react";
 import { toast } from "sonner";
 import { useApp } from "@/lib/app-context";
+import { useIntegration } from "@/lib/integration-context";
+import { adaptiveBudget } from "@/lib/finance";
+import { connectPayPalSandbox } from "@/lib/paypal";
 import { formatMoney, formatAmountInput, parseToInr, CURRENCY_META } from "@/lib/money";
 import type { Currency, FixedObligation } from "@/lib/types";
 import { addMonthsISO } from "@/lib/dates";
-import { generateBudget } from "@/lib/finance";
 import { Logo } from "@/components/brand";
 import { Button } from "@/components/ui/button";
 import { Input, Label, Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/form";
@@ -25,12 +28,21 @@ interface ObligationRow {
   categoryId: string;
 }
 
+interface GoalRow {
+  id: string;
+  name: string;
+  target: string;
+  deadline: string;
+}
+
 const PRESETS: { name: string; categoryId: string; icon: typeof Home }[] = [
   { name: "Rent", categoryId: "cat_rent", icon: Home },
   { name: "Loan / EMI", categoryId: "cat_emi", icon: Landmark },
   { name: "Utilities", categoryId: "cat_utilities", icon: Zap },
   { name: "Transport", categoryId: "cat_transport", icon: Briefcase },
   { name: "Education", categoryId: "cat_education", icon: GraduationCap },
+  { name: "Health", categoryId: "cat_health", icon: HeartPulse },
+  { name: "Other", categoryId: "cat_other", icon: CircleDot },
 ];
 
 const OBLIGATION_CATEGORIES = [
@@ -45,6 +57,7 @@ const OBLIGATION_CATEGORIES = [
 
 export default function OnboardingPage() {
   const { data, completeOnboarding, setProfile, signOut } = useApp();
+  const { status: integration, loading: integrationLoading, refresh: refreshIntegration } = useIntegration();
   const navigate = useNavigate();
   const [step, setStep] = useState(1);
   const [busy, setBusy] = useState(false);
@@ -52,6 +65,7 @@ export default function OnboardingPage() {
 
   const profile = data!.profile;
   const currency = profile.currency;
+  const isDemo = !!profile.demo;
   const [income, setIncome] = useState(profile.monthlyIncome ? formatAmountInput(profile.monthlyIncome, currency) : "");
   const [incomeType, setIncomeType] = useState<"fixed" | "irregular">(profile.incomeType);
   const [rows, setRows] = useState<ObligationRow[]>(() =>
@@ -59,47 +73,38 @@ export default function OnboardingPage() {
       ? profile.fixedObligations.map((o) => ({ id: o.id, name: o.name, amount: formatAmountInput(o.amount, currency), categoryId: o.categoryId }))
       : [],
   );
-  const [savings, setSavings] = useState(
-    profile.savingsTarget ? formatAmountInput(profile.savingsTarget, currency) : "",
-  );
-  const [goalName, setGoalName] = useState("");
-  const [goalTarget, setGoalTarget] = useState("");
-  const [goalDeadline, setGoalDeadline] = useState(addMonthsISO(new Date().toISOString().slice(0, 10), 12));
+  const [goals, setGoals] = useState<GoalRow[]>([]);
+
+  const [clientId, setClientId] = useState("");
+  const [clientSecret, setClientSecret] = useState("");
+  const [connecting, setConnecting] = useState(false);
+  const [connectError, setConnectError] = useState<string | null>(null);
 
   const incomeInr = parseToInr(income, currency);
-  const savingsInr = parseToInr(savings, currency);
   const fixedRows = rows.filter((r) => r.name.trim() && parseToInr(r.amount, currency) > 0);
   const fixedTotal = fixedRows.reduce((s, r) => s + parseToInr(r.amount, currency), 0);
+  const goalRows = goals.filter((g) => g.name.trim() && parseToInr(g.target, currency) > 0);
 
   const preview = useMemo(() => {
-    const tempProfile = {
-      ...profile,
-      monthlyIncome: incomeInr,
-      incomeType,
-      savingsTarget: savingsInr || Math.round(incomeInr * 0.2),
-      fixedObligations: fixedRows.map<FixedObligation>((r) => ({
-        id: r.id,
-        name: r.name,
-        amount: parseToInr(r.amount, currency),
-        categoryId: r.categoryId,
-      })),
-    };
-    const plan = generateBudget(tempProfile, [], data!.categories);
-    const groups = {
-      necessities: plan.envelopes.filter((e) => e.group === "necessities").reduce((s, e) => s + e.allocated, 0),
-      wants: plan.envelopes.filter((e) => e.group === "wants").reduce((s, e) => s + e.allocated, 0),
-      savings: plan.envelopes.filter((e) => e.group === "savings").reduce((s, e) => s + e.allocated, 0),
-    };
-    return { plan, groups };
-  }, [profile, incomeInr, incomeType, savingsInr, fixedRows, currency, data]);
+    const fixedNeeds = fixedRows
+      .filter((r) => data!.categories.find((c) => c.id === r.categoryId)?.group !== "wants")
+      .reduce((s, r) => s + parseToInr(r.amount, currency), 0);
+    const fixedWants = fixedTotal - fixedNeeds;
+    return adaptiveBudget(
+      incomeInr,
+      fixedNeeds,
+      fixedWants,
+      goalRows.map((g) => ({ name: g.name, target: parseToInr(g.target, currency), deadline: g.deadline })),
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [incomeInr, fixedTotal, fixedRows, goalRows, currency, data]);
 
   function changeCurrency(next: Currency) {
     if (next === currency) return;
     const convert = (v: string) => (v ? formatAmountInput(parseToInr(v, currency), next) : "");
     setIncome(convert(income));
-    setSavings(convert(savings));
     setRows((prev) => prev.map((r) => ({ ...r, amount: convert(r.amount) })));
-    setGoalTarget(convert(goalTarget));
+    setGoals((prev) => prev.map((g) => ({ ...g, target: convert(g.target) })));
     setProfile({ currency: next });
   }
 
@@ -110,9 +115,40 @@ export default function OnboardingPage() {
     ]);
   }
 
+  function addGoal() {
+    setGoals((prev) => [...prev, { id: uid("goal"), name: "", target: "", deadline: addMonthsISO(new Date().toISOString().slice(0, 10), 12) }]);
+  }
+
+  function updateGoal(id: string, patch: Partial<GoalRow>) {
+    setGoals((prev) => prev.map((g) => (g.id === id ? { ...g, ...patch } : g)));
+  }
+
+  async function connectSandbox() {
+    setConnectError(null);
+    if (clientId.trim().length < 10 || clientSecret.trim().length < 10) {
+      setConnectError("Enter the sandbox Client ID and Secret from your PayPal developer app.");
+      return;
+    }
+    setConnecting(true);
+    try {
+      await connectPayPalSandbox(clientId.trim(), clientSecret.trim());
+      setClientId("");
+      setClientSecret("");
+      refreshIntegration();
+      toast.success("Sandbox credentials attached", { description: "They belong to this account permanently and can never be changed or removed." });
+    } catch (err) {
+      setConnectError(err instanceof Error ? err.message : "Could not connect the sandbox.");
+    } finally {
+      setConnecting(false);
+    }
+  }
+
   function next() {
     setError(null);
     if (step === 1) {
+      if (!isDemo && !integration.configured) {
+        return setError("Connect your PayPal sandbox credentials to continue. They attach to this account permanently — each account uses its own sandbox.");
+      }
       if (incomeInr <= 0) return setError("Enter your monthly income so the budget has something to work with.");
       setStep(2);
       return;
@@ -123,11 +159,11 @@ export default function OnboardingPage() {
     }
   }
 
-  async function finish() {
+  function finish() {
     setError(null);
-    if (savingsInr < 0) return setError("Savings target can't be negative.");
-    if (goalName.trim() && parseToInr(goalTarget, currency) <= 0) {
-      return setError("Add a target amount for your goal, or clear the goal name.");
+    if (incomeInr <= 0) return setError("Enter your monthly income first.");
+    if (goals.some((g) => (g.name.trim() || parseToInr(g.target, currency) > 0) && !(g.name.trim() && parseToInr(g.target, currency) > 0))) {
+      return setError("Give every savings goal a name and a target, or remove the row.");
     }
     setBusy(true);
     try {
@@ -140,12 +176,12 @@ export default function OnboardingPage() {
           amount: parseToInr(r.amount, currency),
           categoryId: r.categoryId,
         })),
-        savingsTarget: savingsInr || Math.round(incomeInr * 0.2),
-        goal: goalName.trim()
-          ? { name: goalName, target: parseToInr(goalTarget, currency), deadline: goalDeadline }
-          : null,
+        goals: goalRows.map((g) => ({ name: g.name.trim(), target: parseToInr(g.target, currency), deadline: g.deadline })),
+        openingCreditInr: isDemo ? 0 : Math.round(5000 * integration.usdRate),
       });
-      toast.success("Your guardian is ready", { description: "Budget envelopes created and savings target set." });
+      toast.success("Your AI budget is ready", {
+        description: goalRows.length ? `${goalRows.length} goal${goalRows.length === 1 ? "" : "s"} funded before wants.` : "Savings maximised for your income.",
+      });
       navigate("/app");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not finish setup.");
@@ -155,10 +191,12 @@ export default function OnboardingPage() {
   }
 
   const steps = [
-    { n: 1, label: "Income", icon: Wallet },
+    { n: 1, label: "Sandbox", icon: FlaskConical },
     { n: 2, label: "Obligations", icon: Landmark },
-    { n: 3, label: "Savings goal", icon: Target },
+    { n: 3, label: "Goals", icon: Target },
   ];
+
+  const sandboxNote = integration.source === "env" ? "Credentials come from the server environment." : "Stored encrypted on the server.";
 
   return (
     <div className="min-h-dvh bg-background">
@@ -188,7 +226,7 @@ export default function OnboardingPage() {
             <div>
               <p className="text-[10.5px] font-semibold uppercase tracking-[0.16em] text-primary">Step {step} of 3</p>
               <h1 className="mt-1 text-xl font-semibold tracking-tight sm:text-2xl">
-                {step === 1 ? "What comes in each month?" : step === 2 ? "What's already spoken for?" : "What are you saving for?"}
+                {step === 1 ? "Connect your PayPal sandbox" : step === 2 ? "What's already spoken for?" : "What are you saving for?"}
               </h1>
             </div>
             <div className="flex items-center gap-1.5" aria-hidden>
@@ -200,7 +238,68 @@ export default function OnboardingPage() {
 
           <div className="mt-6">
             {step === 1 && (
-              <div className="space-y-6">
+              <div className="space-y-5">
+                <div className="rounded-2xl border border-border p-4">
+                  <div className="flex items-start gap-3">
+                    <span className={cn(
+                      "flex h-9 w-9 shrink-0 items-center justify-center rounded-xl",
+                      integration.configured ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300" : "bg-amber-100 text-amber-700 dark:bg-amber-500/15 dark:text-amber-300",
+                    )}>
+                      {integration.configured ? <ShieldCheck className="h-4 w-4" /> : <FlaskConical className="h-4 w-4" />}
+                    </span>
+                    <div className="min-w-0 flex-1">
+                      <p className="text-[13px] font-semibold">
+                        {integrationLoading ? "Checking sandbox…" : integration.configured ? "Sandbox credentials attached" : "Attach your PayPal sandbox"}
+                      </p>
+                      <p className="mt-0.5 text-[11.5px] leading-relaxed text-muted-foreground">
+                        {integration.configured
+                          ? `Orders, invoices and payouts run on api-m.sandbox.paypal.com through your own sandbox account. ${sandboxNote}`
+                          : isDemo
+                            ? "The demo workspace shares the server's sandbox account — nothing to connect."
+                            : "Every account uses its own sandbox credentials. They are verified with PayPal, stored encrypted on the server, and can never be changed or removed afterwards."}
+                      </p>
+                      {integration.configured && (
+                        <div className="mt-2 flex flex-wrap items-center gap-2 text-[10.5px]">
+                          <span className="rounded-full bg-muted px-2 py-0.5 font-semibold text-muted-foreground">api-m.sandbox</span>
+                          <span className="rounded-full bg-muted px-2 py-0.5 font-semibold text-muted-foreground">{integration.payoutsEnabled ? "Payouts on" : "Payouts off"}</span>
+                          <span className="rounded-full bg-emerald-100 px-2 py-0.5 font-semibold text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300">Attached permanently</span>
+                          <button type="button" onClick={refreshIntegration} className="inline-flex items-center gap-1 font-semibold text-primary hover:underline">
+                            <RefreshCw className="h-3 w-3" /> Re-check
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  {!isDemo && !integration.configured && !integrationLoading && (
+                    <div className="mt-4 space-y-3 border-t border-border/70 pt-4">
+                      <p className="text-[11.5px] leading-relaxed text-muted-foreground">
+                        Paste your sandbox app credentials from{" "}
+                        <a href="https://developer.paypal.com/dashboard/applications/sandbox" target="_blank" rel="noreferrer" className="font-semibold text-primary hover:underline">developer.paypal.com</a>.
+                        They are sent to the server, verified with PayPal, and stored encrypted — never in this app's code or browser storage. Attaching them credits your account with the $5,000 opening balance.
+                      </p>
+                      <div className="grid gap-2 sm:grid-cols-2">
+                        <div className="space-y-1.5">
+                          <Label htmlFor="sandbox-client-id">Sandbox Client ID</Label>
+                          <Input id="sandbox-client-id" value={clientId} onChange={(e) => setClientId(e.target.value)} placeholder="AY…" autoComplete="off" spellCheck={false} disabled={connecting} />
+                        </div>
+                        <div className="space-y-1.5">
+                          <Label htmlFor="sandbox-client-secret">Sandbox Secret</Label>
+                          <Input id="sandbox-client-secret" type="password" value={clientSecret} onChange={(e) => setClientSecret(e.target.value)} placeholder="EL…" autoComplete="off" spellCheck={false} disabled={connecting} />
+                        </div>
+                      </div>
+                      {connectError && <p role="alert" className="text-[11.5px] font-medium text-danger">{connectError}</p>}
+                      <div className="flex flex-wrap items-center gap-2">
+                        <Button type="button" onClick={connectSandbox} disabled={connecting}>
+                          {connecting ? <Loader2 className="animate-spin" /> : <KeyRound />}
+                          {connecting ? "Verifying…" : "Attach sandbox credentials"}
+                        </Button>
+                        <span className="text-[11px] font-medium text-amber-600 dark:text-amber-400">Required — each account uses its own sandbox.</span>
+                      </div>
+                    </div>
+                  )}
+                </div>
+
                 <div>
                   <Label className="mb-2 block">Income pattern</Label>
                   <div className="grid grid-cols-2 gap-2" role="radiogroup" aria-label="Income pattern">
@@ -239,9 +338,9 @@ export default function OnboardingPage() {
                   </p>
                 </div>
                 <div className="rounded-2xl border border-border/70 bg-muted/40 p-4">
-                  <p className="flex items-center gap-1.5 text-[12px] font-semibold"><Sparkles className="h-3.5 w-3.5 text-primary" /> How we use this</p>
+                  <p className="flex items-center gap-1.5 text-[12px] font-semibold"><Sparkles className="h-3.5 w-3.5 text-primary" /> Your budget is built in the next steps</p>
                   <p className="mt-1.5 text-[11.5px] leading-relaxed text-muted-foreground">
-                    Your income sets the budget ceiling. We protect 20% for savings, cover fixed costs at face value, and split the rest between necessities and wants. You can edit every envelope later.
+                    Add fixed costs and savings goals, then the AI builds an adaptive budget: essentials grow slower than income, goals are funded first, and whatever a calm lifestyle leaves over is saved.
                   </p>
                 </div>
               </div>
@@ -250,7 +349,7 @@ export default function OnboardingPage() {
             {step === 2 && (
               <div className="space-y-5">
                 <p className="text-[13px] leading-relaxed text-muted-foreground">
-                  Rent, EMIs, internet — the costs that repeat no matter what. These get funded first.
+                  Rent, EMIs, internet, health cover — the costs that repeat no matter what. These get funded first.
                 </p>
                 <div className="flex flex-wrap gap-2">
                   {PRESETS.map((p) => (
@@ -260,7 +359,7 @@ export default function OnboardingPage() {
                       onClick={() => addRow(p)}
                       className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-card px-2.5 py-1.5 text-[11.5px] font-medium text-muted-foreground transition-colors hover:border-primary/40 hover:text-foreground"
                     >
-                      <Plus className="h-3 w-3" /> {p.name}
+                      <p.icon className="h-3 w-3" /> {p.name}
                     </button>
                   ))}
                 </div>
@@ -269,7 +368,7 @@ export default function OnboardingPage() {
                   <div className="rounded-2xl border border-dashed border-border px-5 py-8 text-center">
                     <Landmark className="mx-auto h-6 w-6 text-muted-foreground" />
                     <p className="mt-2 text-[13px] font-semibold">No fixed obligations yet</p>
-                    <p className="mt-1 text-[11.5px] text-muted-foreground">Add rent, an EMI, or a recurring bill above. You can also skip this if nothing repeats.</p>
+                    <p className="mt-1 text-[11.5px] text-muted-foreground">Add rent, an EMI, health cover or another recurring bill above. You can skip this if nothing repeats.</p>
                   </div>
                 ) : (
                   <div className="space-y-2.5">
@@ -307,80 +406,94 @@ export default function OnboardingPage() {
                   </div>
                   <Progress value={incomeInr ? (fixedTotal / incomeInr) * 100 : 0} className="mt-2" indicatorClassName={fixedTotal / Math.max(1, incomeInr) > 0.6 ? "bg-warning" : "bg-primary"} />
                   {fixedTotal / Math.max(1, incomeInr) > 0.6 && (
-                    <p className="mt-2 text-[11px] text-warning">Over 60% of income is fixed. We'll shift more of the variable budget toward necessities.</p>
+                    <p className="mt-2 text-[11px] text-warning">Over 60% of income is fixed. The AI will trim wants and defer goals instead of starving essentials.</p>
                   )}
                 </div>
               </div>
             )}
 
             {step === 3 && (
-              <div className="space-y-6">
-                <div className="space-y-1.5">
-                  <Label htmlFor="savings">Monthly savings target</Label>
-                  <MoneyInput id="savings" value={savings} currency={currency} onChange={setSavings} placeholder={incomeInr ? formatAmountInput(Math.round(incomeInr * 0.2), currency) : "0"} />
-                  <div className="flex gap-2 pt-1">
-                    {[10, 20, 30].map((pct) => (
-                      <button
-                        key={pct}
-                        type="button"
-                        onClick={() => setSavings(formatAmountInput(Math.round(incomeInr * (pct / 100)), currency))}
-                        className={cn(
-                          "rounded-lg border px-2.5 py-1 text-[11px] font-medium transition-colors",
-                          savings && Math.abs(savingsInr - incomeInr * (pct / 100)) < incomeInr * 0.01
-                            ? "border-primary bg-primary-soft text-primary"
-                            : "border-border text-muted-foreground hover:text-foreground",
-                        )}
-                      >
-                        {pct}% of income
-                      </button>
-                    ))}
-                  </div>
-                  <p className="text-[11.5px] leading-relaxed text-muted-foreground">
-                    Leave blank to use 20%. If money is tight we protect a smaller amount rather than break the budget.
-                  </p>
-                </div>
+              <div className="space-y-5">
+                <p className="text-[13px] leading-relaxed text-muted-foreground">
+                  Add as many goals as you want. The AI funds them first, then builds the budget around what's already spoken for — no fixed 50/30/20.
+                </p>
 
-                <div className="rounded-2xl border border-border p-4">
-                  <div className="flex items-start gap-2">
-                    <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-emerald-100 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300"><Target className="h-4 w-4" /></span>
-                    <div>
-                      <p className="text-[13px] font-semibold">Start a goal (optional)</p>
-                      <p className="mt-0.5 text-[11.5px] text-muted-foreground">A named goal makes saving feel real. You can add more later.</p>
-                    </div>
+                {goals.length === 0 ? (
+                  <div className="rounded-2xl border border-dashed border-border px-5 py-7 text-center">
+                    <Target className="mx-auto h-6 w-6 text-muted-foreground" />
+                    <p className="mt-2 text-[13px] font-semibold">No goals yet</p>
+                    <p className="mt-1 text-[11.5px] text-muted-foreground">Without goals, every spare rupee still goes to an unassigned savings buffer.</p>
                   </div>
-                  <div className="mt-3 space-y-3">
-                    <Input value={goalName} onChange={(e) => setGoalName(e.target.value)} placeholder="e.g. Emergency fund" aria-label="Goal name" />
-                    <div className="grid gap-2 sm:grid-cols-2">
-                      <MoneyInput value={goalTarget} currency={currency} onChange={setGoalTarget} placeholder="Target amount" />
-                      <div className="space-y-1">
-                        <Label htmlFor="goal-deadline" className="sr-only">Goal deadline</Label>
-                        <Input id="goal-deadline" type="date" value={goalDeadline} onChange={(e) => setGoalDeadline(e.target.value)} min={new Date().toISOString().slice(0, 10)} />
-                      </div>
-                    </div>
-                  </div>
-                </div>
-
-                <div className="rounded-2xl border border-border/70 bg-muted/40 p-4">
-                  <p className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Your starting split</p>
-                  <div className="mt-3 space-y-2.5">
-                    {[
-                      { label: "Necessities", amount: preview.groups.necessities, color: "bg-teal-600" },
-                      { label: "Wants", amount: preview.groups.wants, color: "bg-amber-500" },
-                      { label: "Savings", amount: preview.groups.savings, color: "bg-emerald-500" },
-                    ].map((g) => (
-                      <div key={g.label}>
-                        <div className="flex items-center justify-between text-[12px]">
-                          <span className="flex items-center gap-1.5"><span className={cn("h-2 w-2 rounded-full", g.color)} /> {g.label}</span>
-                          <span className="tabular font-semibold">{formatMoney(g.amount, currency)}</span>
+                ) : (
+                  <div className="space-y-2.5">
+                    {goals.map((goal) => {
+                      const planIndex = goalRows.findIndex((g) => g.id === goal.id);
+                      const funding = planIndex >= 0 ? preview.goalRequests[planIndex] : null;
+                      return (
+                        <div key={goal.id} className="rounded-2xl border border-border bg-muted/20 p-2.5">
+                          <div className="grid grid-cols-[1fr_auto] gap-2 sm:grid-cols-[1.3fr_1fr_1fr_auto] sm:items-center">
+                            <Input value={goal.name} onChange={(e) => updateGoal(goal.id, { name: e.target.value })} placeholder="Goal name (e.g. Emergency fund)" aria-label="Goal name" className="h-10" />
+                            <MoneyInput value={goal.target} currency={currency} onChange={(v) => updateGoal(goal.id, { target: v })} placeholder="Target" className="h-10" />
+                            <Input type="date" value={goal.deadline} onChange={(e) => updateGoal(goal.id, { deadline: e.target.value })} min={new Date().toISOString().slice(0, 10)} aria-label="Goal deadline" className="h-10" />
+                            <Button variant="ghost" size="icon-sm" onClick={() => setGoals((prev) => prev.filter((g) => g.id !== goal.id))} aria-label={`Remove ${goal.name || "goal"}`}>
+                              <Trash2 className="text-muted-foreground" />
+                            </Button>
+                          </div>
+                          {funding && (
+                            <p className="mt-1.5 px-1 text-[10.5px] text-muted-foreground">
+                              Needs {formatMoney(funding.requested, currency)}/mo to hit the date · AI funds <span className="font-semibold text-foreground">{formatMoney(funding.monthly, currency)}/mo</span>
+                            </p>
+                          )}
                         </div>
-                        <Progress value={incomeInr ? (g.amount / incomeInr) * 100 : 0} className="mt-1.5 h-1.5" indicatorClassName={g.color} />
-                      </div>
-                    ))}
+                      );
+                    })}
                   </div>
-                  <p className="mt-3 text-[10.5px] leading-relaxed text-muted-foreground">
-                    Adapted from 50/30/20 for your fixed costs and savings target. Envelopes are editable any time.
-                  </p>
-                </div>
+                )}
+                <button type="button" onClick={addGoal} className="inline-flex items-center gap-1.5 text-[12px] font-semibold text-primary hover:underline">
+                  <Plus className="h-3.5 w-3.5" /> Add a savings goal
+                </button>
+
+                {incomeInr > 0 && (
+                  <div className="space-y-3">
+                    <div className="rounded-2xl border border-border p-4">
+                      <div className="flex items-center justify-between">
+                        <p className="flex items-center gap-1.5 text-[12px] font-semibold"><Sparkles className="h-3.5 w-3.5 text-primary" /> Your AI budget</p>
+                        <span className="rounded-full bg-primary-soft px-2 py-0.5 text-[10px] font-semibold text-primary">Adaptive, not 50/30/20</span>
+                      </div>
+                      <div className="mt-3 space-y-2.5">
+                        {[
+                          { label: "Necessities", amount: preview.essentials, share: preview.needsShare, color: "bg-teal-600" },
+                          { label: "Wants & others", amount: preview.wants, share: preview.wantsShare, color: "bg-amber-500" },
+                          { label: "Savings", amount: preview.savings, share: preview.savingsShare, color: "bg-emerald-500" },
+                        ].map((g) => (
+                          <div key={g.label}>
+                            <div className="flex items-center justify-between text-[12px]">
+                              <span className="flex items-center gap-1.5"><span className={cn("h-2 w-2 rounded-full", g.color)} /> {g.label}</span>
+                              <span className="tabular font-semibold">{formatMoney(g.amount, currency)} <span className="text-muted-foreground">· {g.share}%</span></span>
+                            </div>
+                            <Progress value={incomeInr ? (g.amount / incomeInr) * 100 : 0} className="mt-1.5 h-1.5" indicatorClassName={g.color} />
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+
+                    <div className="rounded-2xl border border-border/70 bg-muted/40 p-4">
+                      <p className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">How the AI decided</p>
+                      <ul className="mt-2 space-y-1.5">
+                        {preview.notes.map((note) => (
+                          <li key={note} className="flex items-start gap-1.5 text-[11.5px] leading-relaxed text-muted-foreground">
+                            <Check className="mt-0.5 h-3 w-3 shrink-0 text-emerald-500" /> {note}
+                          </li>
+                        ))}
+                      </ul>
+                      {preview.goalShortfall > 0 && (
+                        <p className="mt-2 rounded-lg bg-warning-soft px-2.5 py-1.5 text-[11px] font-medium text-warning">
+                          Goals are {formatMoney(preview.goalShortfall, currency)}/mo short of their deadlines at this income — the plan funds what it can.
+                        </p>
+                      )}
+                    </div>
+                  </div>
+                )}
               </div>
             )}
           </div>
@@ -398,7 +511,7 @@ export default function OnboardingPage() {
             ) : (
               <Button onClick={finish} disabled={busy} className="gap-2">
                 {busy ? <Loader2 className="animate-spin" /> : <ShieldCheck />}
-                {busy ? "Building your budget…" : "Create my budget"}
+                {busy ? "Building your budget…" : "Create my AI budget"}
               </Button>
             )}
           </div>
@@ -409,9 +522,9 @@ export default function OnboardingPage() {
             <p className="text-[10.5px] font-semibold uppercase tracking-[0.16em] text-muted-foreground">Your setup</p>
             <div className="mt-4 space-y-3">
               {[
-                { n: 1, label: "Monthly income", value: incomeInr > 0 ? formatMoney(incomeInr, currency) : "—", icon: Wallet },
+                { n: 1, label: "PayPal sandbox", value: integration.configured ? "Attached" : isDemo ? "Shared demo sandbox" : "Required", icon: FlaskConical },
                 { n: 2, label: "Fixed obligations", value: fixedTotal > 0 ? formatMoney(fixedTotal, currency) : "None yet", icon: Landmark },
-                { n: 3, label: "Savings target", value: savingsInr > 0 ? `${formatMoney(savingsInr, currency)}/mo` : "20% default", icon: Target },
+                { n: 3, label: "Savings goals", value: goalRows.length ? `${goalRows.length} goal${goalRows.length === 1 ? "" : "s"}` : "None yet", icon: Target },
               ].map((s) => (
                 <div key={s.n} className={cn("flex items-center gap-3 rounded-xl border p-3 transition-all", step === s.n ? "border-primary/40 bg-primary-soft/40" : "border-transparent")}>
                   <span className={cn("flex h-8 w-8 items-center justify-center rounded-lg", step === s.n ? "bg-primary text-primary-foreground" : "bg-muted text-muted-foreground")}>
@@ -426,13 +539,20 @@ export default function OnboardingPage() {
             </div>
           </div>
           <div className="rounded-3xl border border-border bg-card p-5">
-            <p className="flex items-center gap-1.5 text-[12px] font-semibold"><Sparkles className="h-3.5 w-3.5 text-primary" /> Your guardian will</p>
+            <p className="flex items-center gap-1.5 text-[12px] font-semibold"><Sparkles className="h-3.5 w-3.5 text-primary" /> The budget AI will</p>
             <ul className="mt-3 space-y-2 text-[11.5px] leading-relaxed text-muted-foreground">
-              {["Build envelopes from your real fixed costs", "Set a safe-to-spend number for every day", "Watch for unusual charges and subscription waste", "Show the maths behind every suggestion"].map((t) => (
+              {[
+                "Model essentials below a fixed 50% as income grows",
+                "Fund every savings goal before wants get money",
+                "Keep a calm lifestyle floor instead of cutting to zero",
+                "Push every remaining rupee into savings",
+              ].map((t) => (
                 <li key={t} className="flex items-start gap-2"><Check className="mt-0.5 h-3.5 w-3.5 shrink-0 text-emerald-500" />{t}</li>
               ))}
             </ul>
-            <p className="mt-4 border-t border-border/60 pt-3 text-[10px] leading-relaxed text-muted-foreground">AI suggestions are not financial advice.</p>
+            <p className="mt-4 border-t border-border/60 pt-3 text-[10px] leading-relaxed text-muted-foreground">
+              The engine is deterministic and auditable — every split is explained. Not financial advice.
+            </p>
           </div>
         </aside>
       </div>

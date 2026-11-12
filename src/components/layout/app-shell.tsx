@@ -1,9 +1,10 @@
 import { useEffect, useState } from "react";
 import { Link, NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import {
-  ArrowLeftRight, BarChart3, BellRing, CalendarClock, CreditCard, FlaskConical, LayoutDashboard,
-  LogOut, Menu, Moon, Plus, ReceiptText, Repeat, Search, Settings, ShieldCheck, ShoppingBag,
-  Sparkles, Sun, Target, Wallet,
+  ArrowDownLeft, ArrowLeftRight, ArrowUpRight, BarChart3, BellRing, CalendarClock, CircleDot, CreditCard, FlaskConical, GraduationCap,
+  HeartHandshake, HeartPulse, Landmark, LayoutDashboard,
+  LogOut, Menu, Moon, ReceiptText, Repeat, Search, Settings, ShieldCheck, ShoppingBag,
+  ShoppingBasket, Sparkles, Sun, Target, Wallet,
 } from "lucide-react";
 import { formatMoney } from "@/lib/money";
 import { useApp, useAppData } from "@/lib/app-context";
@@ -16,7 +17,6 @@ import { Avatar, Badge, Progress } from "@/components/ui/misc";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/form";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger, Popover, PopoverContent, PopoverTrigger } from "@/components/ui/menu";
-import { TransactionDialog } from "@/components/transactions/transaction-dialog";
 import { CommandPalette } from "./command-palette";
 import { upcomingBills, upcomingReminders, buildInsights, safeToSpend, goalProgress } from "@/lib/finance";
 import type { Currency } from "@/lib/types";
@@ -33,16 +33,22 @@ const NAV: { label: string; items: ShellNavItem[] }[] = [
       { to: "/app/transactions", label: "Transactions", icon: ArrowLeftRight },
       { to: "/app/budget", label: "Smart budget", icon: Wallet },
       { to: "/app/goals", label: "Savings goals", icon: Target },
+      { to: "/app/reminders", label: "Reminders", icon: BellRing },
       { to: "/app/analytics", label: "Analytics", icon: BarChart3 },
     ],
   },
   {
     label: "Money flows",
     items: [
-      { to: "/app/subscriptions", label: "Subscriptions", icon: Repeat },
-      { to: "/app/bills", label: "Bills & tickets", icon: ReceiptText },
-      { to: "/app/reminders", label: "Reminders", icon: BellRing },
-      { to: "/app/autopay", label: "Autopay", icon: CalendarClock },
+      { to: "/app/flows/subscriptions", label: "Subscriptions", icon: Repeat },
+      { to: "/app/flows/bills", label: "Bills & tickets", icon: ReceiptText },
+      { to: "/app/flows/emis", label: "EMIs", icon: Landmark },
+      { to: "/app/flows/autopay", label: "Autopay", icon: CalendarClock },
+      { to: "/app/flows/donations", label: "Donations", icon: HeartHandshake },
+      { to: "/app/flows/health", label: "Health", icon: HeartPulse },
+      { to: "/app/flows/education", label: "Education", icon: GraduationCap },
+      { to: "/app/flows/groceries", label: "Groceries", icon: ShoppingBasket },
+      { to: "/app/flows/others", label: "Others", icon: CircleDot },
     ],
   },
   {
@@ -64,10 +70,10 @@ const MOBILE_TABS: ShellNavItem[] = [
 
 export function AppShell() {
   const data = useAppData();
-  const { session, signOut, setProfile, resetDemo } = useApp();
+  const { signOut, setProfile, resetDemo, markAllNotificationsRead } = useApp();
   const { resolved, toggle } = useTheme();
   const { status } = useIntegration();
-  const { quickAddOpen, quickAddType, closeQuickAdd, openQuickAdd, paletteOpen, setPaletteOpen } = useUI();
+  const { paletteOpen, setPaletteOpen } = useUI();
   const navigate = useNavigate();
   const location = useLocation();
   const [moreOpen, setMoreOpen] = useState(false);
@@ -79,7 +85,10 @@ export function AppShell() {
   const bills = upcomingBills(data, 10);
   const reminders = upcomingReminders(data).filter((r) => r.dueDate <= new Date(Date.now() + 10 * 864e5).toISOString().slice(0, 10));
   const nextGoal = [...data.goals].sort((a, b) => goalProgress(b).onTrack === goalProgress(a).onTrack ? 0 : goalProgress(a).onTrack ? 1 : -1)[0];
-  const notifCount = bills.length + reminders.length + insights.filter((i) => i.severity === "critical").length;
+  const notifications = data.notifications ?? [];
+  const unreadCount = notifications.filter((n) => !n.read).length;
+  const attentionCount = bills.length + reminders.length + insights.filter((i) => i.severity === "critical").length;
+  const notifCount = unreadCount + attentionCount;
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -140,7 +149,7 @@ export function AppShell() {
                         {item.to === "/app/guardian" && insights.length > 0 && (
                           <span className="flex h-4 min-w-4 items-center justify-center rounded-full bg-primary px-1 text-[9px] font-bold text-primary-foreground">{insights.length}</span>
                         )}
-                        {item.to === "/app/bills" && bills.length > 0 && (
+                        {item.to === "/app/flows/bills" && bills.length > 0 && (
                           <span className="h-1.5 w-1.5 rounded-full bg-warning" aria-label={`${bills.length} upcoming`} />
                         )}
                       </>
@@ -170,15 +179,15 @@ export function AppShell() {
             onClick={() => navigate("/app/wallet")}
             className="mt-2 flex w-full items-center gap-2 rounded-xl px-2 py-2 text-left transition-colors hover:bg-muted/70"
           >
-            <span className={cn("flex h-6 w-6 items-center justify-center rounded-lg", status.configured || session?.env === "live" ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300" : "bg-indigo-100 text-indigo-700 dark:bg-indigo-500/15 dark:text-indigo-300")}>
-              {session?.env === "live" ? <ShieldCheck className="h-3 w-3" /> : <FlaskConical className="h-3 w-3" />}
+            <span className={cn("flex h-6 w-6 items-center justify-center rounded-lg", status.configured ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300" : "bg-indigo-100 text-indigo-700 dark:bg-indigo-500/15 dark:text-indigo-300")}>
+              <FlaskConical className="h-3 w-3" />
             </span>
             <span className="min-w-0 flex-1">
               <span className="block truncate text-[11px] font-semibold">
-                {session?.env === "live" ? "PayPal live" : status.configured ? "PayPal sandbox" : "Simulated PayPal"}
+                {status.configured ? "PayPal sandbox" : "Simulated PayPal"}
               </span>
               <span className="block truncate text-[10px] text-muted-foreground">
-                {session?.env === "live" ? "Real payments, approved each time" : "No real money moves"}
+                No real money moves
               </span>
             </span>
           </button>
@@ -188,26 +197,28 @@ export function AppShell() {
       {/* Main column */}
       <div className="lg:pl-[248px]">
         <header className="sticky top-0 z-30 border-b border-border/60 bg-background/85 backdrop-blur-xl">
-          <div className="flex h-16 items-center gap-3 px-4 sm:px-6 lg:px-8">
-            <Link to="/app" className="lg:hidden" aria-label="Wallet Guardian dashboard">
+          <div className="flex h-16 items-center gap-2 px-4 sm:gap-3 sm:px-6 lg:px-8">
+            <Link to="/app" className="shrink-0 lg:hidden" aria-label="Wallet Guardian dashboard">
               <Logo compact />
             </Link>
-            <h2 className="hidden text-[13px] font-semibold text-foreground lg:block">{pageTitle}</h2>
+            <h2 className="hidden min-w-0 truncate text-[13px] font-semibold text-foreground lg:block">{pageTitle}</h2>
 
-            <button
-              type="button"
-              onClick={() => setPaletteOpen(true)}
-              className="ml-auto flex h-9 items-center gap-2 rounded-xl border border-border bg-card px-3 text-[12px] text-muted-foreground shadow-sm transition-colors hover:border-primary/30 hover:text-foreground lg:ml-4 lg:w-[260px]"
-              aria-label="Search or jump to"
-            >
-              <Search className="h-3.5 w-3.5" />
-              <span className="hidden flex-1 text-left sm:block">Search or jump to…</span>
-              <kbd className="hidden rounded border border-border bg-muted px-1.5 py-0.5 text-[9.5px] font-semibold sm:block">⌘K</kbd>
-            </button>
+            <div className="flex min-w-0 flex-1 justify-center px-1 sm:px-3">
+              <button
+                type="button"
+                onClick={() => setPaletteOpen(true)}
+                className="flex h-9 w-9 shrink-0 items-center justify-center gap-2 rounded-xl border border-border bg-card px-2 text-[12px] text-muted-foreground shadow-sm transition-colors hover:border-primary/30 hover:text-foreground sm:w-full sm:max-w-[420px] sm:justify-start sm:px-3"
+                aria-label="Search or jump to"
+              >
+                <Search className="h-3.5 w-3.5 shrink-0" />
+                <span className="hidden flex-1 truncate text-left sm:block">Search or jump to…</span>
+                <kbd className="hidden rounded border border-border bg-muted px-1.5 py-0.5 text-[9.5px] font-semibold sm:block">⌘K</kbd>
+              </button>
+            </div>
 
-            <div className="flex items-center gap-1 sm:gap-1.5">
+            <div className="flex shrink-0 items-center gap-1 sm:gap-1.5">
               <Select value={currency} onValueChange={(v) => setProfile({ currency: v as Currency })}>
-                <SelectTrigger className="h-9 w-[74px] border-border text-[11.5px] font-semibold" aria-label="Display currency">
+                <SelectTrigger className="h-9 w-[84px] shrink-0 border-border px-2.5 text-[11.5px] font-semibold" aria-label="Display currency">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
@@ -222,23 +233,38 @@ export function AppShell() {
 
               <Popover open={notifOpen} onOpenChange={setNotifOpen}>
                 <PopoverTrigger asChild>
-                  <Button variant="ghost" size="icon" className="relative" aria-label={`Notifications${notifCount ? `, ${notifCount} items` : ""}`}>
+                  <Button variant="ghost" size="icon" className="relative translate-y-px" aria-label={`Notifications${notifCount ? `, ${notifCount} items` : ""}`}>
                     <BellRing />
                     {notifCount > 0 && <span className="absolute right-2 top-2 flex h-4 min-w-4 items-center justify-center rounded-full bg-danger px-1 text-[8.5px] font-bold text-danger-foreground">{notifCount}</span>}
                   </Button>
                 </PopoverTrigger>
                 <PopoverContent className="w-[min(92vw,340px)] p-0">
                   <div className="border-b border-border/70 px-4 py-3">
-                    <p className="text-[13px] font-semibold">What needs attention</p>
-                    <p className="mt-0.5 text-[11px] text-muted-foreground">Bills, reminders and critical insights</p>
+                    <p className="text-[13px] font-semibold">Notifications</p>
+                    <p className="mt-0.5 text-[11px] text-muted-foreground">Money received, payments sent, and what needs attention</p>
                   </div>
                   <div className="max-h-[340px] overflow-y-auto">
-                    {notifCount === 0 ? (
-                      <p className="px-4 py-8 text-center text-[12px] text-muted-foreground">All clear. Nothing urgent in the next 10 days.</p>
+                    {notifications.length === 0 && attentionCount === 0 ? (
+                      <p className="px-4 py-8 text-center text-[12px] text-muted-foreground">All clear. Nothing needs attention in the next 10 days.</p>
                     ) : (
                       <div className="divide-y divide-border/60">
+                        {notifications.slice(0, 5).map((n) => (
+                          <div key={n.id} className="flex items-start gap-2.5 px-4 py-3">
+                            <span className={cn(
+                              "mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center",
+                              n.kind === "transfer_received" ? "text-emerald-500" : n.kind === "payment_sent" ? "text-indigo-500" : "text-amber-500",
+                            )}>
+                              {n.kind === "transfer_received" ? <ArrowDownLeft className="h-4 w-4" /> : n.kind === "payment_sent" ? <ArrowUpRight className="h-4 w-4" /> : <BellRing className="h-4 w-4" />}
+                            </span>
+                            <div className="min-w-0 flex-1">
+                              <p className="truncate text-[12px] font-medium">{n.title}</p>
+                              <p className="line-clamp-2 text-[11px] text-muted-foreground">{n.body}</p>
+                            </div>
+                            {!n.read && <span className="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full bg-primary" aria-label="Unread" />}
+                          </div>
+                        ))}
                         {bills.slice(0, 3).map((b) => (
-                          <Link key={b.id} to="/app/bills" onClick={() => setNotifOpen(false)} className="flex items-start gap-2.5 px-4 py-3 hover:bg-muted/50">
+                          <Link key={b.id} to="/app/flows/bills" onClick={() => setNotifOpen(false)} className="flex items-start gap-2.5 px-4 py-3 hover:bg-muted/50">
                             <ReceiptText className="mt-0.5 h-4 w-4 shrink-0 text-amber-500" />
                             <div className="min-w-0 flex-1">
                               <p className="truncate text-[12px] font-medium">{b.title}</p>
@@ -268,6 +294,11 @@ export function AppShell() {
                     )}
                   </div>
                   <div className="border-t border-border/70 p-2">
+                    {unreadCount > 0 && (
+                      <Button variant="ghost" className="w-full justify-center text-[12px]" onClick={() => { markAllNotificationsRead(); }}>
+                        Mark all as read
+                      </Button>
+                    )}
                     <Button variant="ghost" className="w-full justify-center text-[12px]" asChild onClick={() => setNotifOpen(false)}>
                       <Link to="/app/guardian">Open Guardian feed</Link>
                     </Button>
@@ -277,7 +308,7 @@ export function AppShell() {
 
               <DropdownMenu>
                 <DropdownMenuTrigger asChild>
-                  <button type="button" className="ml-0.5 rounded-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" aria-label="Account menu">
+                  <button type="button" className="ml-1.5 -translate-y-[3px] rounded-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring sm:ml-2" aria-label="Account menu">
                     <Avatar name={data.profile.name} className="h-8 w-8" />
                   </button>
                 </DropdownMenuTrigger>
@@ -302,43 +333,25 @@ export function AppShell() {
                   </DropdownMenuItem>
                 </DropdownMenuContent>
               </DropdownMenu>
-
-              <Button size="sm" className="hidden gap-1.5 sm:inline-flex" onClick={() => openQuickAdd("expense")}>
-                <Plus /> Add
-              </Button>
             </div>
           </div>
 
           {/* Payment environment banner */}
-          {session?.env === "live" ? (
-            <div className="flex items-center gap-2 border-t border-warning/30 bg-warning-soft px-4 py-1.5 text-[10.5px] text-warning sm:px-6 lg:px-8">
-              <ShieldCheck className="h-3 w-3 shrink-0" />
-              <span className="font-semibold">Live PayPal</span>
-              <span className="hidden opacity-80 sm:inline">— real money moves, but only after you approve each order on PayPal.</span>
-              <span className="ml-auto hidden items-center gap-1 sm:flex">
-                <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" /> Signed in as {session.email}
-              </span>
-              <Link to="/app/wallet" className="ml-auto font-semibold underline underline-offset-2 sm:ml-3">
-                Details
-              </Link>
-            </div>
-          ) : (
-            <div className="flex items-center gap-2 border-t border-indigo-100 bg-indigo-50/70 px-4 py-1.5 text-[10.5px] text-indigo-800 dark:border-indigo-400/10 dark:bg-indigo-500/10 dark:text-indigo-200 sm:px-6 lg:px-8">
-              <FlaskConical className="h-3 w-3 shrink-0" />
-              <span className="font-semibold">Sandbox mode</span>
-              <span className="hidden text-indigo-700/80 dark:text-indigo-200/70 sm:inline">— no real money moves.</span>
-              <span className="ml-auto hidden items-center gap-1 sm:flex">
-                {status.configured ? (
-                  <><span className="h-1.5 w-1.5 rounded-full bg-emerald-500" /> PayPal sandbox keys connected</>
-                ) : (
-                  <><span className="h-1.5 w-1.5 rounded-full bg-amber-500" /> Simulation — keys not configured</>
-                )}
-              </span>
-              <Link to="/app/wallet" className="ml-auto font-semibold underline decoration-indigo-400/50 underline-offset-2 hover:decoration-indigo-500 sm:ml-3">
-                Details
-              </Link>
-            </div>
-          )}
+          <div className="flex items-center gap-2 border-t border-indigo-100 bg-indigo-50/70 px-4 py-1.5 text-[10.5px] text-indigo-800 dark:border-indigo-400/10 dark:bg-indigo-500/10 dark:text-indigo-200 sm:px-6 lg:px-8">
+            <FlaskConical className="h-3 w-3 shrink-0" />
+            <span className="font-semibold">Sandbox mode</span>
+            <span className="hidden text-indigo-700/80 dark:text-indigo-200/70 sm:inline">— no real money moves.</span>
+            <span className="ml-auto hidden items-center gap-1 sm:flex">
+              {status.configured ? (
+                <><span className="h-1.5 w-1.5 rounded-full bg-emerald-500" /> PayPal sandbox keys connected</>
+              ) : (
+                <><span className="h-1.5 w-1.5 rounded-full bg-amber-500" /> Simulation — keys not configured</>
+              )}
+            </span>
+            <Link to="/app/wallet" className="ml-auto font-semibold underline decoration-indigo-400/50 underline-offset-2 hover:decoration-indigo-500 sm:ml-3">
+              Details
+            </Link>
+          </div>
         </header>
 
         <main id="app-main" className="mx-auto w-full max-w-[1360px] px-4 pb-28 pt-5 sm:px-6 lg:px-8 lg:pb-12 lg:pt-7">
@@ -374,15 +387,6 @@ export function AppShell() {
           </button>
         </div>
       </nav>
-      <button
-        type="button"
-        onClick={() => openQuickAdd("expense")}
-        className="fixed bottom-[84px] right-4 z-40 flex h-12 w-12 items-center justify-center rounded-full bg-primary text-primary-foreground shadow-glow transition-transform active:scale-95 lg:hidden"
-        aria-label="Quick add transaction"
-      >
-        <Plus className="h-5 w-5" />
-      </button>
-
       <Dialog open={moreOpen} onOpenChange={setMoreOpen}>
         <DialogContent className="sm:!w-[min(94vw,420px)]">
           <DialogHeader>
@@ -433,7 +437,6 @@ export function AppShell() {
         </DialogContent>
       </Dialog>
 
-      <TransactionDialog open={quickAddOpen} onOpenChange={(o) => (o ? openQuickAdd(quickAddType) : closeQuickAdd())} defaultType={quickAddType} />
       <CommandPalette open={paletteOpen} onOpenChange={setPaletteOpen} />
     </div>
   );

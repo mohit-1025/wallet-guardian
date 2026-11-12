@@ -3,6 +3,7 @@ import cors from "cors";
 import path from "node:path";
 import fs from "node:fs";
 import os from "node:os";
+import { promisify } from "node:util";
 import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
 import crypto from "node:crypto";
@@ -20,208 +21,111 @@ const SESSION_SECRET = process.env.SESSION_SECRET || crypto.randomBytes(32).toSt
 const SESSION_TTL_MS = 8 * 60 * 60 * 1000;
 const COOKIE_NAME = "wg_session";
 
-// Real accounts sign in with PayPal and only ever act on live money. The demo
-// workspace is the single exception: its requests carry an x-wg-account: demo
-// header and run against the sandbox (or a clearly-labelled simulation when no
-// sandbox credentials exist). A real session can never reach the demo path.
-const ENVIRONMENTS = {
-  live: {
-    base: "https://api-m.paypal.com",
-    web: "https://www.paypal.com",
-    clientId: process.env.PAYPAL_LIVE_CLIENT_ID || "",
-    clientSecret: process.env.PAYPAL_LIVE_CLIENT_SECRET || "",
-    payoutsEnabled: String(process.env.PAYPAL_LIVE_PAYOUTS_ENABLED ?? "auto").toLowerCase() !== "false",
-    invoicerEmail: process.env.PAYPAL_INVOICER_EMAIL || "",
-  },
-  sandbox: {
-    base: "https://api-m.sandbox.paypal.com",
-    web: "https://www.sandbox.paypal.com",
-    clientId: process.env.PAYPAL_SANDBOX_CLIENT_ID || "",
-    clientSecret: process.env.PAYPAL_SANDBOX_CLIENT_SECRET || "",
-    payoutsEnabled: String(process.env.PAYPAL_SANDBOX_PAYOUTS_ENABLED ?? "auto").toLowerCase() !== "false",
-    invoicerEmail: process.env.PAYPAL_SANDBOX_INVOICER_EMAIL || "",
-  },
+// Sandbox only. Demo and real accounts share the same PayPal sandbox app, so
+// nothing in this server can reach PayPal's live API or move real money.
+const SANDBOX = {
+  base: "https://api-m.sandbox.paypal.com",
+  web: "https://www.sandbox.paypal.com",
+  clientId: process.env.PAYPAL_SANDBOX_CLIENT_ID || "",
+  clientSecret: process.env.PAYPAL_SANDBOX_CLIENT_SECRET || "",
+  payoutsEnabled: String(process.env.PAYPAL_SANDBOX_PAYOUTS_ENABLED ?? "auto").toLowerCase() !== "false",
+  invoicerEmail: process.env.PAYPAL_SANDBOX_INVOICER_EMAIL || "",
 };
 
-// ---- Server settings store ----
-// The first-run setup page saves the app's live PayPal credentials here. Values
-// are encrypted with AES-256-GCM using a 32-byte key file and never leave the
-// server. The database and key live outside the project so they are never
-// committed or synced with the source tree.
+function sandboxConfigured() {
+  return Boolean(SANDBOX.clientId && SANDBOX.clientSecret);
+}
+
+// ---- Accounts ----
+// Email/password accounts live in a SQLite database beside the server's other
+// private state. Passwords are scrypt-hashed and never stored or logged in
+// plain text.
 const DATA_DIR = process.env.WG_DATA_DIR || path.join(os.homedir(), ".wallet-guardian");
 fs.mkdirSync(DATA_DIR, { recursive: true });
-const settingsDb = new DatabaseSync(path.join(DATA_DIR, "settings.db"));
-settingsDb.exec(
-  "CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL)",
-);
-const SETTINGS_KEY = (() => {
-  const provided = String(process.env.WG_SETTINGS_KEY || "").trim();
-  if (provided) {
-    const buffer = Buffer.from(provided, /^[0-9a-f]{64}$/i.test(provided) ? "hex" : "base64");
-    if (buffer.length === 32) return buffer;
-  }
-  const keyPath = path.join(DATA_DIR, "settings.key");
-  try {
-    const existing = fs.readFileSync(keyPath);
-    if (existing.length === 32) return existing;
-  } catch {
-    // First run: create the key below.
-  }
-  const key = crypto.randomBytes(32);
-  fs.writeFileSync(keyPath, key, { mode: 0o600 });
-  return key;
-})();
+const accountsDb = new DatabaseSync(path.join(DATA_DIR, "accounts.db"));
+accountsDb.exec(`CREATE TABLE IF NOT EXISTS users (
+  id TEXT PRIMARY KEY,
+  email TEXT NOT NULL COLLATE NOCASE UNIQUE,
+  name TEXT NOT NULL,
+  password_hash TEXT NOT NULL,
+  created_at TEXT NOT NULL
+)`);
 
-function encryptSetting(value) {
-  const iv = crypto.randomBytes(12);
-  const cipher = crypto.createCipheriv("aes-256-gcm", SETTINGS_KEY, iv);
-  const encrypted = Buffer.concat([cipher.update(String(value), "utf8"), cipher.final()]);
-  return ["v1", iv.toString("base64url"), cipher.getAuthTag().toString("base64url"), encrypted.toString("base64url")].join(".");
+// Each account attaches its OWN PayPal sandbox app credentials during
+// onboarding, encrypted at rest. They are write-once: no endpoint replaces or
+// removes them, so one account can never spend another's sandbox balance.
+accountsDb.exec(`CREATE TABLE IF NOT EXISTS user_sandbox_credentials (
+  user_id TEXT PRIMARY KEY,
+  value TEXT NOT NULL,
+  created_at TEXT NOT NULL
+)`);
+
+// Internal transfers: paying a receiver whose email is itself a Wallet
+// Guardian account queues a credit here. The receiver's client picks it up,
+// registers the incoming transaction and bumps the balance.
+accountsDb.exec(`CREATE TABLE IF NOT EXISTS incoming_transfers (
+  id TEXT PRIMARY KEY,
+  to_user_id TEXT NOT NULL,
+  from_email TEXT NOT NULL,
+  from_name TEXT NOT NULL,
+  amount_inr REAL NOT NULL,
+  note TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  consumed INTEGER NOT NULL DEFAULT 0
+)`);
+accountsDb.exec(`DROP TABLE IF EXISTS paypal_intents`);
+
+const scrypt = promisify(crypto.scrypt);
+const SCRYPT_N = 16384;
+const SCRYPT_R = 8;
+const SCRYPT_P = 1;
+const SCRYPT_KEYLEN = 64;
+
+async function scryptKey(password, salt, keylen, { N = SCRYPT_N, r = SCRYPT_R, p = SCRYPT_P } = {}) {
+  return Buffer.from(await scrypt(String(password), salt, keylen, { N, r, p, maxmem: 64 * 1024 * 1024 }));
 }
 
-function decryptSetting(raw) {
-  const [version, iv, tag, data] = String(raw || "").split(".");
-  if (version !== "v1" || !iv || !tag || !data) return null;
-  try {
-    const decipher = crypto.createDecipheriv("aes-256-gcm", SETTINGS_KEY, Buffer.from(iv, "base64url"));
-    decipher.setAuthTag(Buffer.from(tag, "base64url"));
-    return Buffer.concat([decipher.update(Buffer.from(data, "base64url")), decipher.final()]).toString("utf8");
-  } catch {
-    return null;
-  }
+async function hashPassword(password) {
+  const salt = crypto.randomBytes(16);
+  const key = await scryptKey(password, salt, SCRYPT_KEYLEN);
+  return ["scrypt", SCRYPT_N, SCRYPT_R, SCRYPT_P, salt.toString("base64url"), key.toString("base64url")].join("$");
 }
 
-function readSetting(key) {
-  const row = settingsDb.prepare("SELECT value FROM app_settings WHERE key = ?").get(key);
-  return row ? decryptSetting(row.value) : null;
+const FALLBACK_SALT = Buffer.alloc(16, 7);
+
+// Runs a full scrypt comparison even for unknown emails so response time does
+// not reveal whether an account exists.
+async function verifyPassword(password, stored) {
+  const [scheme, N, r, p, saltB64, hashB64] = String(stored || "").split("$");
+  const usable =
+    scheme === "scrypt" && Number(N) > 0 && Number(r) > 0 && Number(p) > 0 && Boolean(saltB64) && Boolean(hashB64);
+  const expected = usable ? Buffer.from(hashB64, "base64url") : Buffer.alloc(SCRYPT_KEYLEN);
+  const actual = await scryptKey(
+    password,
+    usable ? Buffer.from(saltB64, "base64url") : FALLBACK_SALT,
+    expected.length || SCRYPT_KEYLEN,
+    { N: Number(N) || SCRYPT_N, r: Number(r) || SCRYPT_R, p: Number(p) || SCRYPT_P },
+  );
+  return usable && actual.length === expected.length && crypto.timingSafeEqual(actual, expected);
 }
 
-function writeSetting(key, value) {
-  settingsDb
-    .prepare(
-      "INSERT INTO app_settings (key, value, updated_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
-    )
-    .run(key, encryptSetting(value), new Date().toISOString());
+function normalizeEmail(value) {
+  return String(value || "").trim().toLowerCase().slice(0, 254);
 }
 
-let credentialSource = null;
-
-function loadStoredCredentials() {
-  if (envConfigured("live")) {
-    credentialSource = "env";
-    return;
-  }
-  const clientId = readSetting("paypal_live_client_id");
-  const clientSecret = readSetting("paypal_live_client_secret");
-  if (clientId && clientSecret) {
-    ENVIRONMENTS.live.clientId = clientId;
-    ENVIRONMENTS.live.clientSecret = clientSecret;
-    credentialSource = "database";
-  }
+function publicUser(row) {
+  return { id: row.id, email: row.email, name: row.name, createdAt: row.created_at || row.createdAt };
 }
 
-function maskClientId(clientId) {
-  if (!clientId) return null;
-  return clientId.length <= 12 ? `${clientId.slice(0, 4)}…` : `${clientId.slice(0, 6)}…${clientId.slice(-4)}`;
-}
-
-function isLocalRequest(req) {
-  const address = req.socket?.remoteAddress || "";
-  return address === "127.0.0.1" || address === "::1" || address === "::ffff:127.0.0.1";
-}
-
-function setupAllowed(req) {
-  return isLocalRequest(req);
-}
-
-async function verifyLiveAppCredentials(clientId, clientSecret) {
-  const basic = Buffer.from(`${clientId}:${clientSecret}`).toString("base64");
-  const res = await fetch(`${ENVIRONMENTS.live.base}/v1/oauth2/token`, {
-    method: "POST",
-    headers: { Authorization: `Basic ${basic}`, "Content-Type": "application/x-www-form-urlencoded" },
-    body: "grant_type=client_credentials",
-    signal: AbortSignal.timeout(10_000),
-  });
-  const body = await res.json().catch(() => ({}));
-  if (!res.ok || !body.access_token) {
-    throw new Error(
-      body.error_description ||
-        "PayPal rejected those credentials. Use the Client ID and Secret from a Live REST app, not a sandbox app.",
-    );
-  }
-}
-
-function envConfigured(env = "live") {
-  const cfg = ENVIRONMENTS[env];
-  return Boolean(cfg?.clientId && cfg?.clientSecret);
-}
-
-function resolveLoginEnv() {
-  return envConfigured("live") ? "live" : null;
-}
-
-loadStoredCredentials();
-
-function loginConfigured() {
-  return Boolean(resolveLoginEnv());
-}
-
-// Payouts, invoicing and reporting use the app's client credentials, so they act
-// on the PayPal business account that owns the app — never on a signed-in payer's
-// personal account. That account's email is allowlisted so other PayPal users
-// who sign in can pay from their own account but cannot move the owner's money.
-const BUSINESS_EMAILS = String(process.env.PAYPAL_BUSINESS_EMAILS || "")
-  .split(",")
-  .map((email) => email.trim().toLowerCase())
-  .filter(Boolean);
-
-function businessAllowed(user) {
-  return Boolean(user?.email) && BUSINESS_EMAILS.includes(String(user.email).toLowerCase());
-}
-
-function paypalCapabilities(env, user, demo = false) {
-  if (demo) {
-    const configured = envConfigured("sandbox");
-    return {
-      identity: true,
-      payerPayments: true,
-      personalBalance: false,
-      personalTransactions: false,
-      businessPayouts: configured && ENVIRONMENTS.sandbox.payoutsEnabled,
-      businessInvoices: configured,
-      businessReporting: false,
-    };
-  }
-  const business = envConfigured(env) && businessAllowed(user);
+function paypalCapabilities(ctx) {
   return {
-    identity: true,
+    identity: false,
     payerPayments: true,
     personalBalance: false,
     personalTransactions: false,
-    businessPayouts: business && ENVIRONMENTS[env].payoutsEnabled,
-    businessInvoices: business,
-    businessReporting: business,
+    businessPayouts: Boolean(ctx?.configured && ctx.cfg.payoutsEnabled),
+    businessInvoices: Boolean(ctx?.configured),
   };
-}
-
-function normalizePayPalUser(info) {
-  const email = info.email || info.emails?.find((entry) => entry.primary)?.value || info.emails?.[0]?.value || "";
-  const payerId = info.payer_id || info.user_id || "";
-  const name =
-    info.name || [info.given_name, info.family_name].filter(Boolean).join(" ") || email.split("@")[0] || "PayPal member";
-  const accountStatus = requireText(info.account_verification_status, 40);
-  return { payerId, email, name, verified: accountStatus.toLowerCase() === "verified", accountStatus };
-}
-
-async function fetchPayPalUserInfo(env, accessToken) {
-  const res = await fetch(`${ENVIRONMENTS[env].base}/v1/identity/oauth2/userinfo?schema=paypalv1.1`, {
-    headers: { Authorization: `Bearer ${accessToken}` },
-  });
-  const info = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(info.message || "Could not read your PayPal profile.");
-  const user = normalizePayPalUser(info);
-  if (!user.payerId || !user.email) throw new Error("PayPal did not return a usable identity.");
-  return user;
 }
 
 const sessions = new Map();
@@ -234,24 +138,6 @@ function safeEqual(a, b) {
   const left = Buffer.from(String(a));
   const right = Buffer.from(String(b));
   return left.length === right.length && crypto.timingSafeEqual(left, right);
-}
-
-function signState(payload) {
-  const body = Buffer.from(JSON.stringify(payload)).toString("base64url");
-  return `${body}.${hmac(body)}`;
-}
-
-function verifyState(raw) {
-  const [body, sig] = String(raw || "").split(".");
-  if (!body || !sig || !safeEqual(sig, hmac(body))) return null;
-  try {
-    const payload = JSON.parse(Buffer.from(body, "base64url").toString("utf8"));
-    if (!payload?.env || !ENVIRONMENTS[payload.env]) return null;
-    if (Date.now() - Number(payload.t) > 10 * 60 * 1000) return null;
-    return payload;
-  } catch {
-    return null;
-  }
 }
 
 function parseCookies(header = "") {
@@ -289,10 +175,10 @@ function sessionCookie(req, value, maxAgeSeconds) {
   return `${COOKIE_NAME}=${value}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAgeSeconds}${secure}`;
 }
 
-function issueSession(req, res, { env, user, accessToken, tokenExpiresAt }) {
+function issueSession(req, res, user) {
   const sid = crypto.randomBytes(24).toString("base64url");
   const expiresAt = Date.now() + SESSION_TTL_MS;
-  sessions.set(sid, { env, user, accessToken, tokenExpiresAt, createdAt: Date.now(), expiresAt });
+  sessions.set(sid, { user, env: "sandbox", createdAt: Date.now(), expiresAt });
   res.setHeader("Set-Cookie", sessionCookie(req, `${sid}.${expiresAt}.${hmac(`${sid}.${expiresAt}`)}`, Math.floor(SESSION_TTL_MS / 1000)));
 }
 
@@ -302,18 +188,13 @@ function destroySession(req, res) {
   res.setHeader("Set-Cookie", sessionCookie(req, "", 0));
 }
 
-function serverErrorPage(title, detail) {
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${title}</title></head>
-<body style="margin:0;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;background:#0c0e17;color:#e7e9f3;display:flex;min-height:100vh;align-items:center;justify-content:center">
-<main style="max-width:520px;padding:32px;text-align:center">
-<h1 style="font-size:22px;margin:0 0 10px">${title}</h1>
-<p style="font-size:14px;line-height:1.6;color:#9aa0b8;margin:0 0 22px">${detail}</p>
-<a href="${APP_BASE_URL}/login" style="display:inline-block;background:#4f46e5;color:white;text-decoration:none;padding:10px 18px;border-radius:10px;font-size:14px;font-weight:600">Back to sign in</a>
-<p style="font-size:12px;color:#6f7590;margin-top:18px">Or use the demo workspace on the login page — it never moves money.</p>
-</main></body></html>`;
-}
-
 app.disable("x-powered-by");
+// Behind a hosting proxy (e.g. Vercel -> Render) set TRUST_PROXY to the number
+// of hops so rate limits key on the real client instead of the proxy.
+const TRUST_PROXY_HOPS = Number(process.env.TRUST_PROXY || 0);
+if (Number.isFinite(TRUST_PROXY_HOPS) && TRUST_PROXY_HOPS > 0) {
+  app.set("trust proxy", TRUST_PROXY_HOPS);
+}
 app.use(cors({ origin: [APP_BASE_URL, PUBLIC_BASE_URL], credentials: true }));
 app.use(express.json({ limit: "1mb" }));
 app.use((_req, res, next) => {
@@ -323,7 +204,7 @@ app.use((_req, res, next) => {
 });
 
 app.use("/api", (req, res, next) => {
-  if (req.path.startsWith("/auth/") || req.path.startsWith("/paypal") || req.path.startsWith("/setup")) {
+  if (req.path.startsWith("/auth/") || req.path.startsWith("/paypal")) {
     res.setHeader("Cache-Control", "no-store");
   }
   if (!["GET", "HEAD", "OPTIONS"].includes(req.method)) {
@@ -347,6 +228,25 @@ app.use("/api", (req, res, next) => {
   bucket.count += 1;
   rateBuckets.set(ip, bucket);
   if (bucket.count > 90) return res.status(429).json({ error: "Too many requests. Please wait a minute." });
+  next();
+});
+
+// Separate, slower budget for credential endpoints to blunt password guessing.
+const authAttempts = new Map();
+app.use("/api/auth", (req, res, next) => {
+  if (req.method !== "POST" || (req.path !== "/login" && req.path !== "/register")) return next();
+  const ip = req.ip || "local";
+  const now = Date.now();
+  const bucket = authAttempts.get(ip) || { count: 0, reset: now + 10 * 60_000 };
+  if (now > bucket.reset) {
+    bucket.count = 0;
+    bucket.reset = now + 10 * 60_000;
+  }
+  bucket.count += 1;
+  authAttempts.set(ip, bucket);
+  if (bucket.count > 20) {
+    return res.status(429).json({ error: "Too many sign-in attempts. Please wait a few minutes." });
+  }
   next();
 });
 
@@ -377,18 +277,132 @@ function isoDate(value, fallback) {
   return /^\d{4}-\d{2}-\d{2}$/.test(String(value || "")) ? String(value) : fallback;
 }
 
-const tokenCaches = {
-  live: { token: null, expiresAt: 0 },
-  sandbox: { token: null, expiresAt: 0 },
-};
+// Access tokens are cached per credential owner ("shared" for the demo, the
+// user id for signed-in accounts) so one user's token never serves another.
+const tokenCaches = new Map();
 
-async function paypalToken(env) {
-  if (!envConfigured(env)) throw new Error(`PayPal ${env} credentials are not configured`);
-  const cache = tokenCaches[env];
+// ---- Sandbox credential store ----
+// Credentials entered during onboarding are verified against PayPal's sandbox,
+// encrypted with AES-256-GCM and kept in settings.db beside the accounts. The
+// key never leaves the server: WG_SETTINGS_KEY, or settings.key generated on
+// first run. Environment credentials still win when both are present.
+function settingsKey() {
+  const raw = String(process.env.WG_SETTINGS_KEY || "").trim();
+  if (raw) {
+    const key = /^[0-9a-f]{64}$/i.test(raw) ? Buffer.from(raw, "hex") : Buffer.from(raw, "base64");
+    if (key.length === 32) return key;
+    console.warn("[settings] WG_SETTINGS_KEY is not 32 bytes — using a generated local key.");
+  }
+  const file = path.join(DATA_DIR, "settings.key");
+  if (fs.existsSync(file)) {
+    const key = fs.readFileSync(file);
+    if (key.length === 32) return key;
+  }
+  const key = crypto.randomBytes(32);
+  fs.writeFileSync(file, key, { mode: 0o600 });
+  return key;
+}
+
+const SETTINGS_KEY = settingsKey();
+const settingsDb = new DatabaseSync(path.join(DATA_DIR, "settings.db"));
+settingsDb.exec("CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)");
+// Older builds created app_settings with a NOT NULL updated_at column, so the
+// upsert has to match whatever schema the on-disk database already has.
+const settingsHasUpdatedAt = settingsDb
+  .prepare("PRAGMA table_info(app_settings)")
+  .all()
+  .some((column) => column.name === "updated_at");
+const upsertSetting = settingsHasUpdatedAt
+  ? settingsDb.prepare(
+      "INSERT INTO app_settings (key, value, updated_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+    )
+  : settingsDb.prepare(
+      "INSERT INTO app_settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+    );
+function saveSetting(key, value) {
+  if (settingsHasUpdatedAt) upsertSetting.run(key, value, new Date().toISOString());
+  else upsertSetting.run(key, value);
+}
+
+function encryptSetting(value) {
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv("aes-256-gcm", SETTINGS_KEY, iv);
+  const data = Buffer.concat([cipher.update(JSON.stringify(value), "utf8"), cipher.final()]);
+  return `${iv.toString("base64url")}.${cipher.getAuthTag().toString("base64url")}.${data.toString("base64url")}`;
+}
+
+function decryptSetting(raw) {
+  const [iv, tag, data] = String(raw).split(".");
+  if (!iv || !tag || !data) throw new Error("stored value is malformed");
+  const decipher = crypto.createDecipheriv("aes-256-gcm", SETTINGS_KEY, Buffer.from(iv, "base64url"));
+  decipher.setAuthTag(Buffer.from(tag, "base64url"));
+  return JSON.parse(Buffer.concat([decipher.update(Buffer.from(data, "base64url")), decipher.final()]).toString("utf8"));
+}
+
+const sandboxSource = { value: sandboxConfigured() ? "env" : "none" };
+
+function applySandboxCredentials({ clientId, clientSecret, invoicerEmail = "", payoutsEnabled = true }) {
+  SANDBOX.clientId = String(clientId || "").trim();
+  SANDBOX.clientSecret = String(clientSecret || "").trim();
+  SANDBOX.invoicerEmail = String(invoicerEmail || "").trim();
+  SANDBOX.payoutsEnabled = payoutsEnabled !== false;
+  tokenCaches.delete("shared");
+}
+
+// Per-user sandbox credentials, attached once during onboarding.
+function getUserSandbox(userId) {
+  const row = accountsDb.prepare("SELECT value FROM user_sandbox_credentials WHERE user_id = ?").get(userId);
+  if (!row) return null;
+  try {
+    const saved = decryptSetting(row.value);
+    if (saved?.clientId && saved?.clientSecret) {
+      return {
+        clientId: String(saved.clientId),
+        clientSecret: String(saved.clientSecret),
+        invoicerEmail: String(saved.invoicerEmail || ""),
+        payoutsEnabled: saved.payoutsEnabled !== false,
+      };
+    }
+  } catch (err) {
+    console.error("[settings] could not read a user's sandbox credentials:", err.message);
+  }
+  return null;
+}
+
+function loadStoredSandboxCredentials() {
+  if (sandboxConfigured()) return;
+  const row = settingsDb.prepare("SELECT value FROM app_settings WHERE key = ?").get("paypal_sandbox");
+  if (!row) return;
+  try {
+    const saved = decryptSetting(row.value);
+    if (saved?.clientId && saved?.clientSecret) {
+      applySandboxCredentials(saved);
+      sandboxSource.value = "stored";
+    }
+  } catch (err) {
+    console.error("[settings] could not read stored sandbox credentials:", err.message);
+  }
+}
+loadStoredSandboxCredentials();
+
+async function verifySandboxCredentials(clientId, clientSecret) {
+  const auth = Buffer.from(`${clientId}:${clientSecret}`).toString("base64");
+  const res = await fetch(`${SANDBOX.base}/v1/oauth2/token`, {
+    method: "POST",
+    headers: { Authorization: `Basic ${auth}`, "Content-Type": "application/x-www-form-urlencoded" },
+    body: "grant_type=client_credentials",
+    signal: AbortSignal.timeout(15000),
+  });
+  const data = await res.json().catch(() => ({}));
+  return { ok: res.ok && Boolean(data.access_token), message: data?.error_description || data?.error || null };
+}
+
+async function paypalToken(ctx) {
+  if (!ctx.configured) throw new Error("PayPal sandbox credentials are not configured for this account");
+  const cache = tokenCaches.get(ctx.cacheKey) || { token: null, expiresAt: 0 };
   if (cache.token && Date.now() < cache.expiresAt - 30_000) return cache.token;
-  const cfg = ENVIRONMENTS[env];
-  const auth = Buffer.from(`${cfg.clientId}:${cfg.clientSecret}`).toString("base64");
-  const res = await fetch(`${cfg.base}/v1/oauth2/token`, {
+  const auth = Buffer.from(`${ctx.cfg.clientId}:${ctx.cfg.clientSecret}`).toString("base64");
+  const res = await fetch(`${SANDBOX.base}/v1/oauth2/token`, {
     method: "POST",
     headers: { Authorization: `Basic ${auth}`, "Content-Type": "application/x-www-form-urlencoded" },
     body: "grant_type=client_credentials",
@@ -397,18 +411,19 @@ async function paypalToken(env) {
   if (!res.ok) throw new Error(data?.error_description || "PayPal authentication failed");
   cache.token = data.access_token;
   cache.expiresAt = Date.now() + (data.expires_in ?? 3000) * 1000;
+  tokenCaches.set(ctx.cacheKey, cache);
   return cache.token;
 }
 
-async function paypal(env, pathname, { method = "GET", body, requestId } = {}) {
-  const token = await paypalToken(env);
+async function paypal(ctx, pathname, { method = "GET", body, requestId } = {}) {
+  const token = await paypalToken(ctx);
   const headers = {
     Authorization: `Bearer ${token}`,
     "Content-Type": "application/json",
     Prefer: "return=representation",
   };
   if (requestId) headers["PayPal-Request-Id"] = requestId;
-  const res = await fetch(`${ENVIRONMENTS[env].base}${pathname}`, {
+  const res = await fetch(`${SANDBOX.base}${pathname}`, {
     method,
     headers,
     body: body ? JSON.stringify(body) : undefined,
@@ -430,173 +445,99 @@ async function paypal(env, pathname, { method = "GET", body, requestId } = {}) {
   return data;
 }
 
-// The demo workspace is unauthenticated but can only ever reach the sandbox.
-// A signed-in real account always resolves to live and never gets a simulation.
+// The demo workspace is unauthenticated and carries an x-wg-account: demo
+// header. Everything, demo or signed in, resolves to the sandbox.
 function isDemoRequest(req) {
   return req.get("x-wg-account") === "demo" && !readSession(req);
 }
 
+// The demo workspace rides on the server's shared sandbox app; every signed-in
+// account uses only the credentials it attached during onboarding.
 function paypalContext(req) {
-  if (isDemoRequest(req)) {
-    return {
-      demo: true,
-      session: null,
-      env: "sandbox",
-      cfg: ENVIRONMENTS.sandbox,
-      configured: envConfigured("sandbox"),
-    };
+  const demo = isDemoRequest(req);
+  const session = readSession(req);
+  if (demo || !session) {
+    return { demo, session, env: "sandbox", cfg: SANDBOX, configured: sandboxConfigured(), cacheKey: "shared" };
   }
+  const creds = getUserSandbox(session.user.id);
   return {
     demo: false,
-    session: readSession(req),
-    env: "live",
-    cfg: ENVIRONMENTS.live,
-    configured: envConfigured("live"),
+    session,
+    env: "sandbox",
+    cfg: creds || { clientId: "", clientSecret: "", invoicerEmail: "", payoutsEnabled: false },
+    configured: Boolean(creds),
+    cacheKey: session.user.id,
   };
 }
 
-function liveUnavailable(res, ctx) {
-  return res.status(503).json({
-    error: `PayPal live is not connected on this server. Open ${APP_BASE_URL}/setup to add your PayPal app credentials, or use the demo workspace.`,
-  });
+function simulated(extra) {
+  return {
+    env: "sandbox",
+    simulated: true,
+    message: "PayPal sandbox simulation — no real money moves.",
+    ...extra,
+  };
 }
 
 app.get("/api/health", (_req, res) => {
   res.json({
     ok: true,
-    paypalMode: resolveLoginEnv() ?? "unconfigured",
-    loginConfigured: loginConfigured(),
-    liveConfigured: envConfigured("live"),
-    sandboxConfigured: envConfigured("sandbox"),
+    paypalMode: sandboxConfigured() ? "sandbox" : "simulated",
+    sandboxConfigured: sandboxConfigured(),
+    loginMode: "email",
     time: new Date().toISOString(),
   });
 });
 
-// ---- First-run PayPal app setup ----
-// These endpoints configure the app's own PayPal REST credentials. They never
-// accept a PayPal account password and only store the client secret encrypted
-// on the server; the browser never reads it back.
-app.get("/api/setup/paypal", (req, res) => {
-  const configured = loginConfigured();
-  res.json({
-    configured,
-    source: credentialSource,
-    env: "live",
-    clientIdHint: configured ? maskClientId(ENVIRONMENTS.live.clientId) : null,
-    redirectUri: `${PUBLIC_BASE_URL}/api/auth/paypal/callback`,
-    canEdit: !configured && setupAllowed(req),
-  });
-});
+// ---- Authentication: email and password ----
 
-app.post("/api/setup/paypal", async (req, res) => {
-  if (loginConfigured()) {
-    return res.status(409).json({
-      error: "PayPal is already connected. Remove the stored credentials on the server before connecting a different app.",
-    });
+app.post("/api/auth/register", async (req, res) => {
+  const name = requireText(req.body?.name, 80);
+  const email = normalizeEmail(req.body?.email);
+  const password = typeof req.body?.password === "string" ? req.body.password : "";
+  if (name.length < 2) return res.status(400).json({ error: "Enter your name." });
+  if (!validEmail(email)) return res.status(400).json({ error: "Enter a valid email address." });
+  if (password.length < 8) return res.status(400).json({ error: "Use a password with at least 8 characters." });
+  if (password.length > 128) return res.status(400).json({ error: "Keep your password under 128 characters." });
+  if (accountsDb.prepare("SELECT id FROM users WHERE email = ?").get(email)) {
+    return res.status(409).json({ error: "An account with that email already exists. Sign in instead." });
   }
-  if (!setupAllowed(req)) {
-    return res.status(403).json({
-      error: "For safety, PayPal setup is only allowed from the machine running the server.",
-    });
-  }
-  const clientId = requireText(req.body?.clientId, 200);
-  const clientSecret = requireText(req.body?.clientSecret, 200);
-  if (clientId.length < 20 || clientSecret.length < 20) {
-    return res.status(400).json({ error: "Enter the Live Client ID and Secret from your PayPal REST app." });
-  }
+
+  let user;
   try {
-    await verifyLiveAppCredentials(clientId, clientSecret);
+    const passwordHash = await hashPassword(password);
+    user = { id: `user_${crypto.randomUUID()}`, email, name, createdAt: new Date().toISOString() };
+    accountsDb
+      .prepare("INSERT INTO users (id, email, name, password_hash, created_at) VALUES (?, ?, ?, ?, ?)")
+      .run(user.id, user.email, user.name, passwordHash, user.createdAt);
   } catch (err) {
-    return res.status(400).json({ error: err.message || "PayPal rejected those credentials." });
-  }
-  writeSetting("paypal_live_client_id", clientId);
-  writeSetting("paypal_live_client_secret", clientSecret);
-  ENVIRONMENTS.live.clientId = clientId;
-  ENVIRONMENTS.live.clientSecret = clientSecret;
-  credentialSource = "database";
-  tokenCaches.live.token = null;
-  tokenCaches.live.expiresAt = 0;
-  console.log("[setup] PayPal live app connected. Real accounts can now sign in.");
-  res.json({ ok: true, configured: true, source: credentialSource });
-});
-
-// ---- Authentication: Log in with PayPal ----
-
-app.get("/api/auth/paypal/start", (req, res) => {
-  const env = resolveLoginEnv();
-  if (!env) {
-    return res
-      .status(503)
-      .type("html")
-      .send(
-        serverErrorPage(
-          "PayPal live sign-in is not connected",
-          `Open the setup page at <code>${APP_BASE_URL}/setup</code> and add the Client ID and Secret from your live PayPal REST app. Register <code>${PUBLIC_BASE_URL}/api/auth/paypal/callback</code> as its redirect URI. Wallet Guardian is live-only: every account signs in with PayPal and moves real money, and each payment still needs approval on PayPal.`,
-        ),
-      );
-  }
-  const cfg = ENVIRONMENTS[env];
-  const state = signState({ n: crypto.randomBytes(16).toString("base64url"), env, t: Date.now() });
-  // Identity only: PayPal has no Log in with PayPal scope for a payer's balance
-  // or personal transaction history, so the app never claims to read those.
-  const params = new URLSearchParams({
-    flowEntry: "static",
-    client_id: cfg.clientId,
-    response_type: "code",
-    scope: "openid profile email https://uri.paypal.com/services/paypalattributes",
-    redirect_uri: `${PUBLIC_BASE_URL}/api/auth/paypal/callback`,
-    state,
-  });
-  res.redirect(`${cfg.web}/connect?${params.toString()}`);
-});
-
-app.get("/api/auth/paypal/callback", async (req, res) => {
-  const state = verifyState(req.query.state);
-  if (!state) {
-    return res.redirect(`${APP_BASE_URL}/login?error=${encodeURIComponent("Sign-in expired or invalid. Please try again.")}`);
-  }
-  if (req.query.error) {
-    const detail = requireText(req.query.error_description, 160) || "PayPal sign-in was cancelled.";
-    return res.redirect(`${APP_BASE_URL}/login?error=${encodeURIComponent(detail)}`);
-  }
-  const code = requireText(req.query.code, 4000);
-  if (!code) {
-    return res.redirect(`${APP_BASE_URL}/login?error=${encodeURIComponent("PayPal did not return a sign-in code.")}`);
-  }
-  if (!envConfigured(state.env)) {
-    return res.redirect(
-      `${APP_BASE_URL}/login?error=${encodeURIComponent(`PayPal ${state.env} credentials are missing on the server.`)}`,
-    );
-  }
-
-  try {
-    const cfg = ENVIRONMENTS[state.env];
-    const basic = Buffer.from(`${cfg.clientId}:${cfg.clientSecret}`).toString("base64");
-    const tokenRes = await fetch(`${cfg.base}/v1/oauth2/token`, {
-      method: "POST",
-      headers: { Authorization: `Basic ${basic}`, "Content-Type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({
-        grant_type: "authorization_code",
-        code,
-        redirect_uri: `${PUBLIC_BASE_URL}/api/auth/paypal/callback`,
-      }).toString(),
-    });
-    const token = await tokenRes.json().catch(() => ({}));
-    if (!tokenRes.ok || !token.access_token) {
-      throw new Error(token.error_description || "Could not exchange the PayPal login code.");
+    if (/UNIQUE|constraint/i.test(String(err?.message || ""))) {
+      return res.status(409).json({ error: "An account with that email already exists. Sign in instead." });
     }
+    console.error("[auth] register failed:", err.message);
+    return res.status(500).json({ error: "Could not create the account. Please try again." });
+  }
 
-    const info = await fetchPayPalUserInfo(state.env, token.access_token);
-    issueSession(req, res, {
-      env: state.env,
-      user: info,
-      accessToken: token.access_token,
-      tokenExpiresAt: Date.now() + Number(token.expires_in || 0) * 1000,
-    });
-    res.redirect(`${APP_BASE_URL}/app`);
+  issueSession(req, res, user);
+  res.status(201).json({ authenticated: true, user, env: "sandbox" });
+});
+
+app.post("/api/auth/login", async (req, res) => {
+  const email = normalizeEmail(req.body?.email);
+  const password = typeof req.body?.password === "string" ? req.body.password : "";
+  if (!validEmail(email) || !password) {
+    return res.status(400).json({ error: "Enter your email and password." });
+  }
+  try {
+    const row = accountsDb.prepare("SELECT * FROM users WHERE email = ?").get(email);
+    const ok = await verifyPassword(password, row?.password_hash);
+    if (!row || !ok) return res.status(401).json({ error: "Email or password is incorrect." });
+    const user = publicUser(row);
+    issueSession(req, res, user);
+    res.json({ authenticated: true, user, env: "sandbox" });
   } catch (err) {
-    console.error("[auth] PayPal callback failed:", err.message);
-    res.redirect(`${APP_BASE_URL}/login?error=${encodeURIComponent(err.message.slice(0, 180))}`);
+    console.error("[auth] login failed:", err.message);
+    res.status(500).json({ error: "Could not sign in. Please try again." });
   }
 });
 
@@ -606,9 +547,8 @@ app.get("/api/auth/me", (req, res) => {
   res.json({
     authenticated: true,
     user: session.user,
-    env: session.env,
-    mode: envConfigured(session.env) ? "live" : "unconfigured",
-    capabilities: paypalCapabilities(session.env, session.user),
+    env: "sandbox",
+    capabilities: paypalCapabilities(paypalContext(req)),
     expiresAt: session.expiresAt,
   });
 });
@@ -618,144 +558,103 @@ app.post("/api/auth/logout", (req, res) => {
   res.json({ ok: true });
 });
 
-// Real money flows require a signed-in PayPal session and fail closed when it
-// expires. The demo workspace is the only unauthenticated caller and is pinned
-// to the sandbox, so it can never touch live money.
+// Signed-in money flows. The demo workspace is the only unauthenticated caller
+// and is pinned to the sandbox just like every account.
 app.use("/api/paypal", (req, res, next) => {
   if (req.path === "/status") return next();
   if (isDemoRequest(req)) return next();
   if (!readSession(req)) {
-    return res.status(401).json({ error: "Sign in with PayPal again to use real payments." });
+    return res.status(401).json({ error: "Sign in to use PayPal payments." });
   }
   next();
 });
 
-app.get("/api/paypal/account", async (req, res) => {
-  const session = readSession(req);
-  if (!session) return res.status(401).json({ error: "Sign in with PayPal to read your account." });
-
-  let user = session.user;
-  let fresh = false;
-  if (session.accessToken && Number(session.tokenExpiresAt) > Date.now() + 5000) {
-    try {
-      user = await fetchPayPalUserInfo(session.env, session.accessToken);
-      fresh = true;
-    } catch (err) {
-      console.warn("[auth] PayPal profile refresh failed:", err.message);
-    }
-  }
-
-  res.json({
-    linked: true,
-    user,
-    env: session.env,
-    capabilities: paypalCapabilities(session.env, user),
-    fresh,
-    note: "PayPal provides your name, email, payer ID and verification status. PayPal does not expose a personal account balance or transaction history to apps using Log in with PayPal, so Wallet Guardian keeps that ledger locally.",
-  });
-});
-
 app.get("/api/paypal/status", (req, res) => {
   const ctx = paypalContext(req);
-  const payoutReady = ctx.demo
-    ? ctx.configured && ctx.cfg.payoutsEnabled
-    : ctx.configured && businessAllowed(ctx.session?.user) && ctx.cfg.payoutsEnabled;
   res.json({
     configured: ctx.configured,
-    clientId: ctx.configured ? ctx.cfg.clientId : null,
-    mode: ctx.demo ? (ctx.configured ? "sandbox" : "simulated") : ctx.configured ? "live" : "unconfigured",
-    env: ctx.env,
+    mode: ctx.configured ? "sandbox" : "simulated",
+    env: "sandbox",
+    source: ctx.demo || !ctx.session ? sandboxSource.value : ctx.configured ? "user" : "none",
     authenticated: Boolean(ctx.session),
-    payoutsEnabled: payoutReady,
+    payoutsEnabled: ctx.configured && ctx.cfg.payoutsEnabled,
     usdRate: USD_INR_RATE,
-    loginMode: resolveLoginEnv() ?? "unconfigured",
-    loginConfigured: loginConfigured(),
-    capabilities: paypalCapabilities(ctx.env, ctx.session?.user, ctx.demo),
+    loginMode: "email",
+    capabilities: paypalCapabilities(ctx),
   });
 });
 
-// ---- PayPal business reporting (client-credentials scope) ----
-// GET /v1/reporting/balances and /v1/reporting/transactions read the business
-// account that owns the app's REST credentials. They cannot read the personal
-// account a payer signed in with, and this data never enters the local ledger.
-app.get("/api/paypal/reporting/overview", async (req, res) => {
+// Onboarding attaches the account's OWN sandbox app credentials. Verified
+// against PayPal, encrypted at rest, and write-once: no endpoint replaces or
+// removes them, so an account always spends from its own sandbox balance.
+app.post("/api/paypal/sandbox/connect", async (req, res) => {
   const session = readSession(req);
-  if (!session) return res.status(401).json({ error: "Sign in with PayPal to read business reporting." });
-  if (!envConfigured(session.env)) {
-    return res.status(503).json({ error: `PayPal ${session.env} credentials are not configured on this server.` });
+  if (!session) return res.status(401).json({ error: "Sign in to connect the PayPal sandbox." });
+  if (getUserSandbox(session.user.id)) {
+    return res.status(409).json({ error: "This account already has sandbox credentials attached. They cannot be changed." });
   }
-  if (!businessAllowed(session.user)) {
-    return res.status(403).json({
-      error:
-        "Business reporting is limited to the account named in PAYPAL_BUSINESS_EMAILS. PayPal Reporting reads the app owner's business account, not the personal account signed in here.",
-    });
+  const clientId = requireText(req.body?.clientId, 200);
+  const clientSecret = requireText(req.body?.clientSecret, 400);
+  if (clientId.length < 10 || clientSecret.length < 10) {
+    return res.status(400).json({ error: "Enter the sandbox Client ID and Secret from developer.paypal.com." });
   }
-
-  const end = isoDate(req.query.end, new Date().toISOString().slice(0, 10));
-  const start = isoDate(req.query.start, new Date(Date.now() - 29 * 86_400_000).toISOString().slice(0, 10));
-
   try {
-    const [balanceData, txData] = await Promise.all([
-      paypal(session.env, "/v1/reporting/balances?currency_code=USD"),
-      paypal(
-        session.env,
-        `/v1/reporting/transactions?start_date=${start}T00:00:00Z&end_date=${end}T23:59:59Z&fields=transaction_info,payer_info&page_size=20&page=1`,
-      ),
-    ]);
-
-    const balances = (balanceData.balances || []).map((entry) => ({
-      currency: entry.currency_code || entry.total_balance?.currency_code || "USD",
-      total: Number(entry.total_balance?.value) || 0,
-      available: Number(entry.available_balance?.value) || 0,
-      withheld: Number(entry.withheld_balance?.value) || 0,
-    }));
-
-    const transactions = (txData.transaction_details || []).map((entry) => {
-      const info = entry.transaction_info || {};
-      const payer = entry.payer_info || {};
-      const amount = info.transaction_amount || {};
-      const payerName =
-        [payer.payer_name?.given_name, payer.payer_name?.surname].filter(Boolean).join(" ") ||
-        requireText(payer.payer_name?.alternate_full_name, 120);
-      return {
-        id: requireText(info.transaction_id, 80),
-        date: requireText(info.transaction_initiation_date, 40),
-        eventCode: requireText(info.transaction_event_code, 12),
-        status: requireText(info.transaction_status, 12),
-        amount: Number(amount.value) || 0,
-        currency: amount.currency_code || "USD",
-        fee: Number(info.fee_amount?.value) || 0,
-        subject: requireText(info.transaction_subject || info.transaction_note, 160),
-        payerName,
-        payerEmail: requireText(payer.email_address, 120),
-        outgoing: Boolean(payer.email_address) && payer.email_address.toLowerCase() === session.user.email.toLowerCase(),
-      };
-    });
-
-    res.json({
-      accountId: balanceData.account_id || null,
-      asOfTime: balanceData.as_of_time || null,
-      refreshedAt: balanceData.last_refresh_time || null,
-      balances,
-      transactions,
-      totalTransactions: Number(txData.total_items) || transactions.length,
-      range: { start, end },
-      env: session.env,
-      note: "Read-only reporting for the PayPal business account that owns this server's app credentials. It is separate from the personal PayPal login used for orders and from the local Wallet Guardian ledger.",
-    });
-  } catch (err) {
-    console.error("[paypal] reporting error", err.message);
-    if (err.status === 401 || err.status === 403) {
-      return res.status(403).json({
-        error:
-          "PayPal refused reporting access. Enable Reporting / Transaction Search for this app and confirm its credentials belong to a PayPal business account.",
+    const check = await verifySandboxCredentials(clientId, clientSecret);
+    if (!check.ok) {
+      return res.status(400).json({
+        error: check.message
+          ? `PayPal rejected these sandbox credentials: ${check.message}`
+          : "PayPal rejected these sandbox credentials. Check the Client ID and Secret.",
       });
     }
-    res.status(502).json({ error: `PayPal reporting failed: ${err.message}` });
+  } catch {
+    return res.status(502).json({ error: "Could not reach the PayPal sandbox to verify the credentials. Try again." });
   }
+  accountsDb
+    .prepare("INSERT INTO user_sandbox_credentials (user_id, value, created_at) VALUES (?, ?, ?)")
+    .run(session.user.id, encryptSetting({ clientId, clientSecret, invoicerEmail: "", payoutsEnabled: true }), new Date().toISOString());
+  console.log(`[paypal] personal sandbox credentials attached for ${session.user.email}`);
+  const ctx = paypalContext(req);
+  res.json({ connected: true, mode: "sandbox", source: "user", payoutsEnabled: true, capabilities: paypalCapabilities(ctx) });
 });
 
-// ---- PayPal money flows ----
+app.post("/api/paypal/sandbox/disconnect", (req, res) => {
+  res.status(409).json({ error: "Sandbox credentials are attached to this account for good and cannot be removed or replaced." });
+});
+
+// ---- Internal transfers between Wallet Guardian accounts ----
+// Paying a receiver whose email belongs to another account queues a credit
+// here. The receiver's client polls, registers the incoming transaction, bumps
+// the balance and marks the transfer consumed.
+app.get('/api/paypal/transfers', (req, res) => {
+  const session = readSession(req);
+  if (!session) return res.status(401).json({ error: 'Sign in to read incoming transfers.' });
+  const rows = accountsDb
+    .prepare('SELECT id, from_email, from_name, amount_inr, note, created_at FROM incoming_transfers WHERE to_user_id = ? AND consumed = 0 ORDER BY created_at')
+    .all(session.user.id);
+  res.json({
+    transfers: rows.map((r) => ({
+      id: r.id,
+      fromEmail: r.from_email,
+      fromName: r.from_name,
+      amountInr: r.amount_inr,
+      note: r.note,
+      createdAt: r.created_at,
+    })),
+  });
+});
+
+app.post('/api/paypal/transfers/consume', (req, res) => {
+  const session = readSession(req);
+  if (!session) return res.status(401).json({ error: 'Sign in to consume incoming transfers.' });
+  const ids = Array.isArray(req.body?.ids) ? req.body.ids.map((v) => requireText(v, 80)).filter(Boolean).slice(0, 100) : [];
+  const stmt = accountsDb.prepare('UPDATE incoming_transfers SET consumed = 1 WHERE to_user_id = ? AND id = ?');
+  let consumed = 0;
+  for (const id of ids) consumed += Number(stmt.run(session.user.id, id).changes);
+  res.json({ consumed });
+});
+
+// ---- PayPal money flows (sandbox) ----
 
 app.post("/api/paypal/order", async (req, res) => {
   const ctx = paypalContext(req);
@@ -767,19 +666,11 @@ app.post("/api/paypal/order", async (req, res) => {
   if (amountUsd < 0.01) return res.status(400).json({ error: "That amount is too small to charge through PayPal." });
 
   if (!ctx.configured) {
-    if (!ctx.demo) return liveUnavailable(res, ctx);
-    return res.json({
-      id: simId("SIM-ORDER"),
-      status: "CREATED",
-      env: ctx.env,
-      simulated: true,
-      amountUsd,
-      message: "Sandbox simulation — no real money moves.",
-    });
+    return res.json(simulated({ id: simId("SIM-ORDER"), status: "CREATED", amountUsd }));
   }
 
   try {
-    const order = await paypal(ctx.env, "/v2/checkout/orders", {
+    const order = await paypal(ctx, "/v2/checkout/orders", {
       method: "POST",
       body: {
         intent,
@@ -793,177 +684,150 @@ app.post("/api/paypal/order", async (req, res) => {
       requestId: `wg-${crypto.randomUUID()}`,
     });
     const approvalUrl = order.links?.find((l) => l.rel === "approve" || l.rel === "payer-action")?.href;
-    res.json({ id: order.id, status: order.status, env: ctx.env, simulated: false, approvalUrl, amountUsd });
+    res.json({ id: order.id, status: order.status, env: "sandbox", simulated: false, approvalUrl, amountUsd });
   } catch (err) {
     console.error("[paypal] order error", err.message);
-    if (ctx.demo) {
-      return res.json({
+    res.json(
+      simulated({
         id: simId("SIM-ORDER"),
         status: "CREATED",
-        env: ctx.env,
-        simulated: true,
         amountUsd,
-        message: `PayPal sandbox unavailable (${err.message}). Simulated and labelled.`,
-      });
-    }
-    res.status(502).json({ error: `PayPal error: ${err.message}` });
+        message: `PayPal sandbox unavailable (${err.message}). Simulated and labelled — no real money moves.`,
+      }),
+    );
   }
 });
 
 app.post("/api/paypal/order/:id/capture", async (req, res) => {
   const ctx = paypalContext(req);
   const orderId = requireText(req.params.id, 80);
-  if (!ctx.configured || (ctx.demo && orderId.startsWith("SIM-"))) {
-    if (!ctx.demo) return liveUnavailable(res, ctx);
-    return res.json({
-      id: orderId,
-      status: "COMPLETED",
-      env: ctx.env,
-      simulated: true,
-      captureId: simId("SIM-CAPTURE"),
-      message: "Sandbox simulation — no real money moved.",
-    });
+  if (!ctx.configured || orderId.startsWith("SIM-")) {
+    return res.json(
+      simulated({ id: orderId, status: "COMPLETED", captureId: simId("SIM-CAPTURE"), message: "PayPal sandbox simulation — no real money moved." }),
+    );
   }
   try {
-    const data = await paypal(ctx.env, `/v2/checkout/orders/${encodeURIComponent(orderId)}/capture`, {
+    const data = await paypal(ctx, `/v2/checkout/orders/${encodeURIComponent(orderId)}/capture`, {
       method: "POST",
       body: {},
       requestId: `wg-cap-${crypto.randomUUID()}`,
     });
     const captureId = data.purchase_units?.[0]?.payments?.captures?.[0]?.id;
-    res.json({ id: data.id, status: data.status, env: ctx.env, simulated: false, captureId });
+    res.json({ id: data.id, status: data.status, env: "sandbox", simulated: false, captureId });
   } catch (err) {
-    if (ctx.demo) {
-      return res.json({
-        id: orderId,
-        status: "COMPLETED",
-        env: ctx.env,
-        simulated: true,
-        captureId: simId("SIM-CAPTURE"),
-        message: `PayPal sandbox capture failed (${err.message}). Simulated and labelled.`,
-      });
-    }
-    res.status(502).json({ error: `PayPal capture failed: ${err.message}` });
+    // A real order that could not be captured (e.g. ORDER_NOT_APPROVED) must
+    // surface as a failure — silently simulating a capture would credit an
+    // in-app balance for money that never moved in the sandbox.
+    res.json({ id: orderId, status: "FAILED", env: "sandbox", simulated: false, captureId: undefined, error: err.message });
   }
 });
 
 app.post("/api/paypal/order/:id/authorize", async (req, res) => {
   const ctx = paypalContext(req);
   const orderId = requireText(req.params.id, 80);
-  if (!ctx.configured || (ctx.demo && orderId.startsWith("SIM-"))) {
-    if (!ctx.demo) return liveUnavailable(res, ctx);
-    return res.json({
-      id: orderId,
-      status: "COMPLETED",
-      env: ctx.env,
-      simulated: true,
-      authorizationId: simId("SIM-AUTH"),
-      message: "Sandbox simulation — no real money is held.",
-    });
+  if (!ctx.configured || orderId.startsWith("SIM-")) {
+    return res.json(
+      simulated({
+        id: orderId,
+        status: "COMPLETED",
+        authorizationId: simId("SIM-AUTH"),
+        message: "PayPal sandbox simulation — no funds are held.",
+      }),
+    );
   }
   try {
-    const data = await paypal(ctx.env, `/v2/checkout/orders/${encodeURIComponent(orderId)}/authorize`, {
+    const data = await paypal(ctx, `/v2/checkout/orders/${encodeURIComponent(orderId)}/authorize`, {
       method: "POST",
       body: {},
       requestId: `wg-auth-${crypto.randomUUID()}`,
     });
     const authorizationId = data.purchase_units?.[0]?.payments?.authorizations?.[0]?.id;
-    res.json({ id: data.id, status: data.status, env: ctx.env, simulated: false, authorizationId });
+    res.json({ id: data.id, status: data.status, env: "sandbox", simulated: false, authorizationId });
   } catch (err) {
-    if (ctx.demo) {
-      return res.json({
+    res.json(
+      simulated({
         id: orderId,
         status: "COMPLETED",
-        env: ctx.env,
-        simulated: true,
         authorizationId: simId("SIM-AUTH"),
         message: `PayPal sandbox authorization failed (${err.message}). Simulated and labelled.`,
-      });
-    }
-    res.status(502).json({ error: `PayPal authorization failed: ${err.message}` });
+      }),
+    );
   }
 });
 
 app.post("/api/paypal/authorization/:id/capture", async (req, res) => {
   const ctx = paypalContext(req);
   const authId = requireText(req.params.id, 80);
-  if (!ctx.configured || (ctx.demo && authId.startsWith("SIM-"))) {
-    if (!ctx.demo) return liveUnavailable(res, ctx);
-    return res.json({ id: simId("SIM-CAPTURE"), status: "COMPLETED", env: ctx.env, simulated: true });
+  if (!ctx.configured || authId.startsWith("SIM-")) {
+    return res.json(simulated({ id: simId("SIM-CAPTURE"), status: "COMPLETED" }));
   }
   try {
-    const data = await paypal(ctx.env, `/v2/payments/authorizations/${encodeURIComponent(authId)}/capture`, {
+    const data = await paypal(ctx, `/v2/payments/authorizations/${encodeURIComponent(authId)}/capture`, {
       method: "POST",
       body: { final_capture: true },
       requestId: `wg-auth-cap-${crypto.randomUUID()}`,
     });
-    res.json({ id: data.id, status: data.status, env: ctx.env, simulated: false, captureId: data.id });
+    res.json({ id: data.id, status: data.status, env: "sandbox", simulated: false, captureId: data.id });
   } catch (err) {
-    if (ctx.demo) {
-      return res.json({ id: simId("SIM-CAPTURE"), status: "COMPLETED", env: ctx.env, simulated: true });
-    }
-    res.status(502).json({ error: `PayPal capture failed: ${err.message}` });
+    res.json(
+      simulated({
+        id: simId("SIM-CAPTURE"),
+        status: "COMPLETED",
+        message: `PayPal sandbox capture failed (${err.message}). Simulated and labelled.`,
+      }),
+    );
   }
 });
 
 app.post("/api/paypal/authorization/:id/void", async (req, res) => {
   const ctx = paypalContext(req);
   const authId = requireText(req.params.id, 80);
-  if (!ctx.configured || (ctx.demo && authId.startsWith("SIM-"))) {
-    if (!ctx.demo) return liveUnavailable(res, ctx);
-    return res.json({ id: authId, status: "VOIDED", env: ctx.env, simulated: true });
+  if (!ctx.configured || authId.startsWith("SIM-")) {
+    return res.json(simulated({ id: authId, status: "VOIDED" }));
   }
   try {
-    await paypal(ctx.env, `/v2/payments/authorizations/${encodeURIComponent(authId)}/void`, {
+    await paypal(ctx, `/v2/payments/authorizations/${encodeURIComponent(authId)}/void`, {
       method: "POST",
       requestId: `wg-void-${crypto.randomUUID()}`,
     });
-    res.json({ id: authId, status: "VOIDED", env: ctx.env, simulated: false });
+    res.json({ id: authId, status: "VOIDED", env: "sandbox", simulated: false });
   } catch (err) {
-    if (ctx.demo) {
-      return res.json({ id: authId, status: "VOIDED", env: ctx.env, simulated: true });
-    }
-    res.status(502).json({ error: `PayPal release failed: ${err.message}` });
+    res.json(
+      simulated({
+        id: authId,
+        status: "VOIDED",
+        message: `PayPal sandbox release failed (${err.message}). Simulated and labelled.`,
+      }),
+    );
   }
 });
 
 app.post("/api/paypal/invoice", async (req, res) => {
   const ctx = paypalContext(req);
-  if (!ctx.demo && !businessAllowed(ctx.session?.user)) {
-    return res.status(403).json({
-      error:
-        "Invoices are limited to the PayPal business account named in PAYPAL_BUSINESS_EMAILS. Other PayPal logins can ask for money from their own PayPal account.",
-    });
-  }
   const email = requireText(req.body?.email, 120);
   const name = requireText(req.body?.name, 80) || "Wallet Guardian customer";
   const amountInr = parseInr(req.body?.amountInr);
   const description = requireText(req.body?.description, 100) || "Payment request";
+  const dueDate = isoDate(req.body?.dueDate, new Date().toISOString().slice(0, 10));
   if (!validEmail(email)) return res.status(400).json({ error: "A valid recipient email is required." });
   if (!amountInr) return res.status(400).json({ error: "Enter a valid invoice amount." });
   const amountUsd = usdFromInr(amountInr);
 
   if (!ctx.configured) {
-    if (!ctx.demo) return liveUnavailable(res, ctx);
-    return res.json({
-      invoiceId: simId("SIM-INV"),
-      status: "DRAFT",
-      env: ctx.env,
-      simulated: true,
-      message: "Sandbox simulation — no PayPal invoice was created.",
-    });
+    return res.json(
+      simulated({ invoiceId: simId("SIM-INV"), status: "DRAFT", message: "PayPal sandbox simulation — no invoice was created." }),
+    );
   }
 
   try {
-    const today = new Date().toISOString().slice(0, 10);
-    const invoice = await paypal(ctx.env, "/v2/invoicing/invoices", {
+    const invoice = await paypal(ctx, "/v2/invoicing/invoices", {
       method: "POST",
       body: {
         detail: {
           invoice_number: simId("WG"),
           currency_code: "USD",
           note: description,
-          payment_term: { term_type: "DUE_ON_DATE_SPECIFIED", due_date: today },
+          payment_term: { term_type: "DUE_ON_DATE_SPECIFIED", due_date: dueDate },
         },
         invoicer: ctx.cfg.invoicerEmail ? { email_address: ctx.cfg.invoicerEmail } : undefined,
         primary_recipients: [{ billing_info: { email_address: email, name: { given_name: name } } }],
@@ -982,7 +846,7 @@ app.post("/api/paypal/invoice", async (req, res) => {
     let status = "DRAFT";
     let message;
     try {
-      await paypal(ctx.env, `/v2/invoicing/invoices/${encodeURIComponent(invoiceId)}/send`, {
+      await paypal(ctx, `/v2/invoicing/invoices/${encodeURIComponent(invoiceId)}/send`, {
         method: "POST",
         body: { send_to_recipient: true, send_to_invoicer: false },
         requestId: `wg-inv-send-${crypto.randomUUID()}`,
@@ -995,33 +859,24 @@ app.post("/api/paypal/invoice", async (req, res) => {
     res.json({
       invoiceId,
       status,
-      env: ctx.env,
+      env: "sandbox",
       simulated: false,
-      invoiceUrl: `${ctx.cfg.web}/invoice/p/#${invoiceId}`,
+      invoiceUrl: `${SANDBOX.web}/invoice/p/#${invoiceId}`,
       message,
     });
   } catch (err) {
-    if (ctx.demo) {
-      return res.json({
+    res.json(
+      simulated({
         invoiceId: simId("SIM-INV"),
         status: "DRAFT",
-        env: ctx.env,
-        simulated: true,
         message: `PayPal sandbox invoice failed (${err.message}). Simulated and labelled.`,
-      });
-    }
-    res.status(502).json({ error: `PayPal invoice failed: ${err.message}` });
+      }),
+    );
   }
 });
 
 app.post("/api/paypal/payout", async (req, res) => {
   const ctx = paypalContext(req);
-  if (!ctx.demo && !businessAllowed(ctx.session?.user)) {
-    return res.status(403).json({
-      error:
-        "Payouts are limited to the PayPal business account named in PAYPAL_BUSINESS_EMAILS. Other PayPal logins can use Pay someone to approve a payment from their own account.",
-    });
-  }
   const email = requireText(req.body?.email, 120);
   const name = requireText(req.body?.name, 100) || "Payee";
   const amountInr = parseInr(req.body?.amountInr);
@@ -1030,27 +885,44 @@ app.post("/api/paypal/payout", async (req, res) => {
   if (!amountInr) return res.status(400).json({ error: "Enter a valid payout amount." });
   const amountUsd = usdFromInr(amountInr);
 
+  // A receiver who is themselves a Wallet Guardian account gets credited here
+  // in-app, whatever PayPal's sandbox answers. Queued before the PayPal call so
+  // the in-app leg never depends on the sandbox leg.
+  let internalTransfer = null;
+  if (ctx.session) {
+    const receiver = accountsDb.prepare("SELECT id, email, name FROM users WHERE email = ?").get(normalizeEmail(email));
+    if (receiver && receiver.id !== ctx.session.user.id) {
+      accountsDb
+        .prepare("INSERT INTO incoming_transfers (id, to_user_id, from_email, from_name, amount_inr, note, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
+        .run(
+          `tr_${crypto.randomUUID()}`,
+          receiver.id,
+          ctx.session.user.email,
+          ctx.session.user.name,
+          amountInr,
+          note,
+          new Date().toISOString(),
+        );
+      internalTransfer = { toName: receiver.name };
+    }
+  }
+
   const simulatedPayout = (reason) => ({
     batchId: simId("SIM-PAYOUT"),
     status: "SIMULATED",
-    env: ctx.env,
+    env: "sandbox",
     simulated: true,
+    internalTransfer,
     message: `${reason} No real money moved.`,
   });
 
-  if (!ctx.configured) {
-    if (ctx.demo) return res.json(simulatedPayout("PayPal sandbox credentials are not configured."));
-    return liveUnavailable(res, ctx);
-  }
+  if (!ctx.configured) return res.json(simulatedPayout("PayPal sandbox credentials are not configured."));
   if (!ctx.cfg.payoutsEnabled) {
-    if (ctx.demo) return res.json(simulatedPayout("PayPal Payouts are disabled on the sandbox account."));
-    return res.status(503).json({
-      error: "PayPal Payouts are disabled for this app. Enable Payouts on your PayPal business account, or set PAYPAL_LIVE_PAYOUTS_ENABLED=true.",
-    });
+    return res.json(simulatedPayout("PayPal Payouts are disabled on the sandbox account."));
   }
 
   try {
-    const data = await paypal(ctx.env, "/v1/payments/payouts", {
+    const data = await paypal(ctx, "/v1/payments/payouts", {
       method: "POST",
       body: {
         sender_batch_header: {
@@ -1073,13 +945,13 @@ app.post("/api/paypal/payout", async (req, res) => {
     res.json({
       batchId: data.batch_header?.payout_batch_id || simId("BATCH"),
       status: data.batch_header?.batch_status || "PENDING",
-      env: ctx.env,
+      env: "sandbox",
       simulated: false,
+      internalTransfer,
     });
   } catch (err) {
     console.error("[paypal] payout failed:", err.message);
-    if (ctx.demo) return res.json(simulatedPayout(`PayPal sandbox payout failed (${err.message}).`));
-    res.status(502).json({ error: `PayPal payout failed: ${err.message}` });
+    res.json(simulatedPayout(`PayPal sandbox payout failed (${err.message}).`));
   }
 });
 
@@ -1101,21 +973,10 @@ app.use((err, _req, res, _next) => {
 
 app.listen(PORT, () => {
   console.log(`Wallet Guardian API on http://localhost:${PORT}`);
+  console.log("Accounts: email + password sign-in enabled. All PayPal activity runs on the sandbox.");
   console.log(
-    loginConfigured()
-      ? credentialSource === "database"
-        ? "PayPal live app connected from the local settings database. Real accounts sign in with PayPal and move real money."
-        : "PayPal live credentials detected in the environment. Real accounts sign in with PayPal and move real money."
-      : `PayPal live is not connected. Open ${APP_BASE_URL}/setup to add your PayPal REST app credentials.`,
-  );
-  console.log(
-    envConfigured("sandbox")
-      ? "PayPal sandbox credentials detected. The demo workspace can call the sandbox API."
-      : "No sandbox credentials. The demo workspace uses clearly-labelled simulations only.",
-  );
-  console.log(
-    BUSINESS_EMAILS.length
-      ? `Business-account payouts, invoices and reporting enabled for ${BUSINESS_EMAILS.length} account(s).`
-      : "Business-account payouts, invoices and reporting disabled (set PAYPAL_BUSINESS_EMAILS to enable).",
+    sandboxConfigured()
+      ? "PayPal sandbox credentials detected. Orders, invoices and payouts call the sandbox API."
+      : "No sandbox credentials. Payments use clearly-labelled simulations only.",
   );
 });

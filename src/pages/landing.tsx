@@ -121,7 +121,7 @@ const features = [
     icon: Wallet,
     eyebrow: "Adaptive budgeting",
     title: "A budget that bends with real life",
-    body: "Start from 50/30/20, then adapt to rent, EMIs and how you actually spend. Edit any envelope; we warn before it hurts.",
+    body: "Set your savings goals first and the plan funds them, then sizes rent, EMIs, wants and savings to what you actually earn — no fixed 50/30/20 rule.",
     points: ["Envelopes for needs, wants, savings", "80% and 100% nudges", "Roll unspent money into goals"],
   },
   {
@@ -215,16 +215,16 @@ export default function LandingPage() {
               </p>
               <div className="mt-7 flex flex-col gap-3 sm:flex-row">
                 <Button size="lg" onClick={tryDemo} disabled={busy} className="gap-2 shadow-glow">
-                  {busy ? "Loading your demo…" : "Explore the live demo"}
+                  {busy ? "Loading your demo…" : "Explore the demo"}
                   {!busy && <ArrowRight />}
                 </Button>
                 <Button size="lg" variant="outline" asChild>
-                  <Link to="/login">Sign in with PayPal</Link>
+                  <Link to="/login">Sign in with email</Link>
                 </Button>
               </div>
               <div className="mt-5 flex flex-wrap items-center gap-x-4 gap-y-2 text-[11.5px] text-muted-foreground">
                 <span className="inline-flex items-center gap-1.5"><Check className="h-3.5 w-3.5 text-emerald-500" /> No sign-up for the demo</span>
-                <span className="inline-flex items-center gap-1.5"><FlaskConical className="h-3.5 w-3.5 text-indigo-500" /> PayPal sign-in, sandbox demo</span>
+                <span className="inline-flex items-center gap-1.5"><FlaskConical className="h-3.5 w-3.5 text-indigo-500" /> Email sign-in, sandbox payments</span>
                 <span className="inline-flex items-center gap-1.5"><LockKeyhole className="h-3.5 w-3.5 text-emerald-500" /> Data stays on this device</span>
               </div>
             </div>
@@ -367,14 +367,14 @@ export default function LandingPage() {
           <div className="grid gap-4 lg:grid-cols-3">
             <div className="lg:col-span-2 rounded-3xl border border-indigo-200/60 bg-gradient-to-br from-indigo-50 to-card p-7 shadow-soft dark:border-indigo-400/15 dark:from-indigo-500/10 dark:to-card sm:p-9">
               <span className="inline-flex items-center gap-1.5 rounded-full bg-white/70 px-2.5 py-1 text-[10.5px] font-semibold text-indigo-700 dark:bg-white/10 dark:text-indigo-200">
-                <FlaskConical className="h-3 w-3" /> Demo stays in the sandbox
+                <FlaskConical className="h-3 w-3" /> Sandbox for every account
               </span>
-              <h2 className="mt-4 text-2xl font-semibold tracking-tight">Sign in with PayPal. Pay for real only when you choose.</h2>
+              <h2 className="mt-4 text-2xl font-semibold tracking-tight">Create an account with email. Every payment stays in the sandbox.</h2>
               <p className="mt-2 max-w-xl text-[13.5px] leading-relaxed text-muted-foreground">
-                The demo runs Orders, Invoicing, Payouts and Patient Checkout against the PayPal sandbox. Sign in with your PayPal account to run the same flows for real — every charge still needs your approval on PayPal, and client secrets never leave the server.
+                Both the demo and email accounts run Orders, Invoicing, Payouts and Patient Checkout against the PayPal sandbox — no live API, no real money. Passwords are salted and hashed on the server, and client secrets never leave it.
               </p>
               <div className="mt-6 flex flex-wrap gap-2">
-                {["Orders", "Invoicing", "Payouts", "Authorize → Capture", "Live only after sign-in"].map((p) => (
+                {["Orders", "Invoicing", "Payouts", "Authorize → Capture", "Sandbox only"].map((p) => (
                   <span key={p} className="rounded-lg border border-indigo-200/70 bg-white/70 px-2.5 py-1 text-[11px] font-medium text-indigo-700 dark:border-indigo-400/20 dark:bg-white/5 dark:text-indigo-200">{p}</span>
                 ))}
               </div>
@@ -413,7 +413,7 @@ export default function LandingPage() {
                 {busy ? "Loading demo…" : "Try the demo now"} <ArrowRight />
               </Button>
               <Button size="lg" variant="ghost" asChild className="text-indigo-100 hover:bg-white/10 hover:text-white">
-                <Link to="/login">Sign in with PayPal</Link>
+                <Link to="/login">Sign in with email</Link>
               </Button>
             </div>
             <p className="relative mt-5 text-[10.5px] text-indigo-200/60">Demo: no real money and no card required. Not financial advice.</p>
@@ -426,7 +426,7 @@ export default function LandingPage() {
           <Logo />
           <p className="text-[11.5px] text-muted-foreground">Built with React, Tailwind, Recharts and PayPal Orders, Invoicing and Payouts APIs.</p>
           <div className="flex items-center gap-4 text-[11.5px] text-muted-foreground">
-            <Link to="/login" className="hover:text-foreground">Sign in with PayPal</Link>
+            <Link to="/login" className="hover:text-foreground">Sign in with email</Link>
             <span className="inline-flex items-center gap-1"><FlaskConical className="h-3 w-3" /> Demo sandbox</span>
           </div>
         </div>

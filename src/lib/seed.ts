@@ -311,6 +311,7 @@ export function buildDemoUser(): UserData {
     goals,
     subscriptions: subs,
     bills,
+    flowExpenses: [],
     reminders,
     scheduledPayments,
     insights: [],
@@ -320,6 +321,7 @@ export function buildDemoUser(): UserData {
     products,
     prices,
     offers: OFFERS,
+    notifications: [],
     seeded: true,
   };
 }
@@ -339,6 +341,7 @@ export function createEmptyUser(profile: Profile): UserData {
     goals: [],
     subscriptions: [],
     bills: [],
+    flowExpenses: [],
     reminders: [],
     scheduledPayments: [],
     insights: [],
@@ -348,6 +351,7 @@ export function createEmptyUser(profile: Profile): UserData {
     products,
     prices,
     offers: OFFERS,
+    notifications: [],
     seeded: false,
   };
 }

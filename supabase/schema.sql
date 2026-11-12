@@ -1,8 +1,8 @@
 -- Wallet Guardian — Supabase schema (auth + Postgres + row-level security)
 --
 -- The shipping build is local-first: user data lives in the browser and PayPal
--- calls go through the server-side API. This migration is the hosted path for
--- teams that want multi-device sync. Apply it in the Supabase SQL editor, then
+-- sandbox calls go through the server-side API. This migration is the hosted path
+-- for teams that want multi-device sync. Apply it in the Supabase SQL editor, then
 -- point a storage adapter at these tables. Every user-owned row is protected by
 -- RLS; the price catalog is read-only reference data.
 
@@ -23,15 +23,8 @@ create table if not exists public.profiles (
   fixed_obligations jsonb not null default '[]'::jsonb,
   wallet_balance numeric(14, 2) not null default 0,
   demo boolean not null default false,
-  paypal_payer_id text,
-  paypal_email text,
-  paypal_env text not null default 'sandbox' check (paypal_env in ('sandbox', 'live')),
   created_at timestamptz not null default now()
 );
-
-create unique index if not exists profiles_paypal_payer_id_key
-  on public.profiles (paypal_payer_id)
-  where paypal_payer_id is not null;
 
 create or replace function public.handle_new_user()
 returns trigger
@@ -40,13 +33,11 @@ security definer
 set search_path = public
 as $$
 begin
-  insert into public.profiles (id, email, name, paypal_payer_id, paypal_email)
+  insert into public.profiles (id, email, name)
   values (
     new.id,
     coalesce(new.email, ''),
-    coalesce(new.raw_user_meta_data ->> 'name', ''),
-    nullif(new.raw_user_meta_data ->> 'paypal_payer_id', ''),
-    nullif(new.raw_user_meta_data ->> 'paypal_email', '')
+    coalesce(new.raw_user_meta_data ->> 'name', '')
   )
   on conflict (id) do nothing;
   return new;

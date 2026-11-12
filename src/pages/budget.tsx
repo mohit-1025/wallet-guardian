@@ -23,19 +23,22 @@ import { Label, Select, SelectContent, SelectItem, SelectTrigger, SelectValue } 
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { CategoryIcon } from "@/components/ui/category-icon";
 import { Money, MoneyInput } from "@/components/ui/money";
+import { ChartTooltip } from "@/components/charts/chart-tooltip";
 import { useApp, useAppData } from "@/lib/app-context";
 import {
   budgetSnapshot,
   envelopeSpent,
+  flowBudgetComparison,
   generateBudget,
   GROUP_META,
   type BudgetPlan,
 } from "@/lib/finance";
-import { formatAmountInput, formatMoney, parseToInr } from "@/lib/money";
+import { formatAmountInput, formatCompact, formatMoney, parseToInr } from "@/lib/money";
 import { monthKey, monthLabel, nextMonthKey, previousMonthKey } from "@/lib/dates";
 import { formatPct } from "@/lib/money";
 import type { BudgetEnvelope, EnvelopeGroup } from "@/lib/types";
 import { cn } from "@/lib/utils";
+import { Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 
 const GROUP_ORDER: EnvelopeGroup[] = ["necessities", "wants", "savings"];
 
@@ -47,7 +50,7 @@ const GROUP_HINT: Record<EnvelopeGroup, string> = {
 
 export default function BudgetPage() {
   const data = useAppData();
-  const { ensureBudget, updateEnvelope, moveEnvelopeMoney, rolloverMonth, replaceMonthBudget } = useApp();
+  const { ensureBudget, updateEnvelope, moveEnvelopeMoney, rolloverMonth, replaceMonthBudget, updateGoal } = useApp();
   const currency = data.profile.currency;
   const [month, setMonth] = useState(monthKey());
   const [editEnv, setEditEnv] = useState<BudgetEnvelope | null>(null);
@@ -77,6 +80,7 @@ export default function BudgetPage() {
   }, [snap.envelopes, data.transactions, month]);
 
   const totalAllocated = groupTotals.reduce((s, g) => s + g.allocated, 0);
+  const flowRows = useMemo(() => flowBudgetComparison(data, month), [data, month]);
   const overAllocated = totalAllocated > income + 1;
   const isFuture = month > monthKey();
   const canRollover = month < monthKey() && (budget?.rollover ?? 0) === 0 && data.goals.length > 0;
@@ -156,14 +160,19 @@ export default function BudgetPage() {
   }
 
   function openRegen() {
-    setRegenPreview(generateBudget(data.profile, data.transactions, data.categories, month));
+    setRegenPreview(generateBudget(data.profile, data.transactions, data.categories, month, data.goals));
     setRegenOpen(true);
   }
 
   function confirmRegen() {
     if (!regenPreview) return;
     replaceMonthBudget(month, { budget: regenPreview.budget, envelopes: regenPreview.envelopes });
-    toast.success("Plan regenerated", { description: "Envelopes now follow your latest income and spending." });
+    const funded = data.goals.filter((g) => g.name.trim() && g.target > 0);
+    regenPreview.adaptive.goalRequests.forEach((request, i) => {
+      const goal = funded[i];
+      if (goal) updateGoal(goal.id, { autoMonthly: request.monthly });
+    });
+    toast.success("Plan regenerated", { description: "Envelopes and goal funding now follow your latest income and spending." });
     setRegenOpen(false);
   }
 
@@ -185,7 +194,7 @@ export default function BudgetPage() {
           </div>
         }
         title="Smart budget"
-        description="An adaptive 50/30/20 plan built from your income, fixed obligations and the last two months of real spending. Edit anything — warning colours show when an envelope is tight."
+        description="An adaptive plan that funds your savings goals first, then sizes necessities to your income and lifestyle, not a fixed 50/30/20 split. Edit anything — warning colours show when an envelope is tight."
         actions={
           <>
             <div className="flex h-9 items-center rounded-xl border border-border bg-card shadow-sm">
@@ -307,6 +316,50 @@ export default function BudgetPage() {
               </CardContent>
             </Card>
           </div>
+
+          <Card className="mt-4">
+            <CardHeader className="pb-2">
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div>
+                  <CardTitle>Plan vs money flows vs actual</CardTitle>
+                  <p className="text-[11.5px] text-muted-foreground">
+                    Envelope target, committed money flows and payments recorded this month, per flow category.
+                  </p>
+                </div>
+                <div className="flex flex-wrap items-center gap-3 text-[10.5px] text-muted-foreground">
+                  <span className="flex items-center gap-1"><span className="h-2 w-2 rounded-full bg-indigo-200" /> Plan target</span>
+                  <span className="flex items-center gap-1"><span className="h-2 w-2 rounded-full bg-indigo-600" /> Money flows</span>
+                  <span className="flex items-center gap-1"><span className="h-2 w-2 rounded-full bg-amber-500" /> Actual</span>
+                </div>
+              </div>
+            </CardHeader>
+            <CardContent>
+              {flowRows.length === 0 ? (
+                <p className="py-6 text-center text-[11.5px] text-muted-foreground">
+                  Add a money flow or record a payment to see the comparison.
+                </p>
+              ) : (
+                <div className="w-full overflow-x-auto">
+                  <div className="h-[250px] min-w-[560px]">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <BarChart data={flowRows} margin={{ top: 8, right: 4, left: -16, bottom: 0 }} barGap={3}>
+                        <CartesianGrid vertical={false} stroke="hsl(var(--border))" strokeDasharray="3 4" />
+                        <XAxis dataKey="label" axisLine={false} tickLine={false} tick={{ fontSize: 10.5 }} dy={6} interval={0} />
+                        <YAxis axisLine={false} tickLine={false} tick={{ fontSize: 10 }} tickFormatter={(v) => formatCompact(Number(v), currency)} width={58} />
+                        <Tooltip content={<ChartTooltip currency={currency} />} cursor={{ fill: "hsl(var(--muted) / 0.5)" }} />
+                        <Bar dataKey="planned" name="Plan target" fill="#c7d2fe" radius={[5, 5, 0, 0]} maxBarSize={18} />
+                        <Bar dataKey="flows" name="Money flows" fill="#4f46e5" radius={[5, 5, 0, 0]} maxBarSize={18} />
+                        <Bar dataKey="actual" name="Actual" fill="#f59e0b" radius={[5, 5, 0, 0]} maxBarSize={18} />
+                      </BarChart>
+                    </ResponsiveContainer>
+                  </div>
+                </div>
+              )}
+              <p className="mt-1 text-[10.5px] leading-relaxed text-muted-foreground">
+                Payments from this app, PayPal or autopay update the Actual bar immediately. A payment with no known flow is kept under Others until it is tagged.
+              </p>
+            </CardContent>
+          </Card>
 
           {isCurrent && (
             <div className="mt-3">

@@ -1,6 +1,6 @@
 import type { Profile, Session, UserData } from "./types";
+import { backfillLegacyDueDates, dedupeLegacyFlows, enrichTransactions, flowsFromLegacy, flowsFromObligations } from "./flows";
 import { buildDemoUser, createEmptyUser } from "./seed";
-import type { PayPalIdentity } from "./auth";
 
 const PREFIX = "walletGuardian.v1";
 const USERS_KEY = `${PREFIX}.users`;
@@ -13,7 +13,6 @@ export interface StoredUser {
   id: string;
   name: string;
   email: string;
-  payerId?: string;
   createdAt: string;
 }
 
@@ -52,33 +51,56 @@ export function saveSession(session: Session | null) {
 }
 
 export function getUserData(userId: string): UserData | null {
-  return read<UserData | null>(dataKey(userId), null);
+  const data = read<UserData | null>(dataKey(userId), null);
+  if (!data) return null;
+  const migrated = withFlowMigration(data);
+  if (migrated !== data) saveUserData(migrated);
+  return migrated;
+}
+
+function withFlowMigration(data: UserData): UserData {
+  if (!Array.isArray(data.notifications)) data = { ...data, notifications: [] };
+  const raw = Array.isArray(data.flowExpenses) ? data.flowExpenses : [];
+  const existing = dedupeLegacyFlows(raw);
+  const migrated = flowsFromObligations(data.profile.fixedObligations ?? [], existing);
+  const legacy = data.legacyFlowsMerged ? [] : flowsFromLegacy(data.subscriptions ?? [], data.bills ?? [], [...existing, ...migrated]);
+  const combined = [...existing, ...migrated, ...legacy];
+  const backfilled = backfillLegacyDueDates(combined, data.subscriptions ?? [], data.bills ?? []);
+  const transactions = enrichTransactions(Array.isArray(data.transactions) ? data.transactions : []);
+  if (
+    existing.length === raw.length && migrated.length === 0 && legacy.length === 0 &&
+    backfilled === combined && transactions === data.transactions &&
+    data.flowsInitialized && data.legacyFlowsMerged
+  ) return data;
+  return {
+    ...data,
+    flowExpenses: backfilled,
+    transactions,
+    flowsInitialized: true,
+    legacyFlowsMerged: true,
+  };
 }
 
 export function saveUserData(data: UserData) {
   write(dataKey(data.profile.id), data);
 }
 
-function paypalUserId(payerId: string) {
-  return `paypal_${payerId.replace(/[^A-Za-z0-9_-]/g, "").slice(0, 48)}`;
-}
-
 /**
- * Local ledger for a PayPal login. The server owns the real PayPal identity and
- * session; this only remembers which budget belongs to that payer in this browser.
+ * Local ledger for an email account. The server owns the account and its
+ * session cookie; this only remembers which budget belongs to that account in
+ * this browser.
  */
-export function signInWithPayPal(
-  identity: PayPalIdentity,
+export function signInWithAccount(
+  identity: { id: string; name: string; email: string },
   previous: Session | null = null,
 ): { session: Session; data: UserData } {
-  const id = paypalUserId(identity.payerId);
+  const id = identity.id;
   const users = getUsers();
   const existing = users.find((u) => u.id === id);
   const user: StoredUser = {
     id,
     name: identity.name,
     email: identity.email,
-    payerId: identity.payerId,
     createdAt: existing?.createdAt ?? new Date().toISOString(),
   };
   saveUsers([...users.filter((u) => u.id !== id), user]);
@@ -108,11 +130,8 @@ export function signInWithPayPal(
     userId: id,
     email: identity.email,
     name: identity.name,
-    provider: "paypal",
-    payerId: identity.payerId,
-    env: "live",
-    verified: identity.verified,
-    accountStatus: identity.accountStatus,
+    provider: "email",
+    env: "sandbox",
     signedInAt: previous?.userId === id ? previous.signedInAt : new Date().toISOString(),
   };
   saveSession(session);
@@ -153,7 +172,7 @@ export function ensureDemoAccount(): { session: Session; data: UserData } {
   const user = saveDemoUser();
   let data = getUserData(DEMO_ID);
   if (!data || !data.profile.demo) {
-    data = buildDemoUser();
+    data = withFlowMigration(buildDemoUser());
     saveUserData(data);
   }
   const session = demoSession(user);
@@ -163,7 +182,7 @@ export function ensureDemoAccount(): { session: Session; data: UserData } {
 
 export function resetDemoData(): { session: Session; data: UserData } {
   const user = saveDemoUser();
-  const data = buildDemoUser();
+  const data = withFlowMigration(buildDemoUser());
   saveUserData(data);
   const session = demoSession(user);
   saveSession(session);
@@ -173,10 +192,10 @@ export function resetDemoData(): { session: Session; data: UserData } {
 /** Replaces a real user's ledger with the sample workspace, keeping their identity. */
 export function loadSampleWorkspace(session: Session): UserData {
   const base = buildDemoUser();
-  const data: UserData = {
+  const data: UserData = withFlowMigration({
     ...base,
     profile: { ...base.profile, id: session.userId, name: session.name, email: session.email, demo: false },
-  };
+  });
   saveUserData(data);
   return data;
 }

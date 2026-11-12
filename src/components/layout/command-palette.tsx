@@ -2,11 +2,9 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import {
   ArrowLeftRight, ArrowRight, BarChart3, BellRing, CalendarClock, CreditCard, LayoutDashboard,
-  Plus, ReceiptText, Repeat, Search, Settings, ShoppingBag, Sparkles, Target, TrendingDown,
-  TrendingUp, Wallet,
+  ReceiptText, Repeat, Search, Settings, ShoppingBag, Sparkles, Target, Wallet,
 } from "lucide-react";
 import { Dialog, DialogContent } from "@/components/ui/dialog";
-import { useUI } from "./ui-context";
 import { useAppData } from "@/lib/app-context";
 import { type Currency } from "@/lib/types";
 import { formatMoney } from "@/lib/money";
@@ -24,7 +22,6 @@ interface Item {
 export function CommandPalette({ open, onOpenChange }: { open: boolean; onOpenChange: (o: boolean) => void }) {
   const data = useAppData();
   const navigate = useNavigate();
-  const { openQuickAdd } = useUI();
   const [query, setQuery] = useState("");
   const [selected, setSelected] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -46,8 +43,6 @@ export function CommandPalette({ open, onOpenChange }: { open: boolean; onOpenCh
 
   const items = useMemo<Item[]>(() => {
     const actions: Item[] = [
-      { id: "add-exp", group: "Quick actions", label: "Add an expense", hint: "Log spending", icon: TrendingDown, run: () => { onOpenChange(false); openQuickAdd("expense"); } },
-      { id: "add-inc", group: "Quick actions", label: "Add income", hint: "Salary, freelance, refund", icon: TrendingUp, run: () => { onOpenChange(false); openQuickAdd("income"); } },
       { id: "ask", group: "Quick actions", label: "Ask the Guardian", hint: "Grounded in your data", icon: Sparkles, run: () => go("/app/guardian") },
       { id: "shopper", group: "Quick actions", label: "Compare a product", hint: "Smart Shopper", icon: ShoppingBag, run: () => go("/app/shopper") },
     ];
@@ -57,10 +52,10 @@ export function CommandPalette({ open, onOpenChange }: { open: boolean; onOpenCh
       { id: "budget", group: "Go to", label: "Smart budget", icon: Wallet, run: () => go("/app/budget") },
       { id: "goals", group: "Go to", label: "Savings goals", icon: Target, run: () => go("/app/goals") },
       { id: "analytics", group: "Go to", label: "Analytics", icon: BarChart3, run: () => go("/app/analytics") },
-      { id: "subs", group: "Go to", label: "Subscriptions", icon: Repeat, run: () => go("/app/subscriptions") },
-      { id: "bills", group: "Go to", label: "Bills & tickets", icon: ReceiptText, run: () => go("/app/bills") },
+      { id: "subs", group: "Go to", label: "Subscriptions", icon: Repeat, run: () => go("/app/flows/subscriptions") },
+      { id: "bills", group: "Go to", label: "Bills & tickets", icon: ReceiptText, run: () => go("/app/flows/bills") },
       { id: "rem", group: "Go to", label: "Reminders", icon: BellRing, run: () => go("/app/reminders") },
-      { id: "autopay", group: "Go to", label: "Autopay", icon: CalendarClock, run: () => go("/app/autopay") },
+      { id: "autopay", group: "Go to", label: "Autopay", icon: CalendarClock, run: () => go("/app/flows/autopay") },
       { id: "wallet", group: "Go to", label: "Wallet & PayPal", icon: CreditCard, run: () => go("/app/wallet") },
       { id: "settings", group: "Go to", label: "Settings", icon: Settings, run: () => go("/app/settings") },
     ];
@@ -182,7 +177,7 @@ export function CommandPalette({ open, onOpenChange }: { open: boolean; onOpenCh
             <span><kbd className="rounded border border-border bg-muted px-1 py-0.5">↑</kbd> <kbd className="rounded border border-border bg-muted px-1 py-0.5">↓</kbd> navigate</span>
             <span><kbd className="rounded border border-border bg-muted px-1 py-0.5">↵</kbd> open</span>
           </span>
-          <span className="flex items-center gap-1"><Plus className="h-3 w-3" /> quick add from anywhere</span>
+          <span className="hidden sm:inline">activity syncs from PayPal</span>
         </div>
       </DialogContent>
     </Dialog>

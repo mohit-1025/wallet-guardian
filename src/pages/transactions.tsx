@@ -1,35 +1,44 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import { Link } from "react-router-dom";
 import {
-  AlertTriangle,
   ArrowDownLeft,
   ArrowUpRight,
   Download,
-  FileSpreadsheet,
   Paperclip,
   Pencil,
-  Plus,
   Receipt,
   Search,
-  Trash2,
-  Upload,
+  StickyNote,
+  Tag,
   X,
 } from "lucide-react";
 import { toast } from "sonner";
 import { PageHeader, Badge, EmptyState, InfoNote } from "@/components/ui/misc";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { Input, Label, Select, SelectContent, SelectItem, SelectTrigger, SelectValue, Textarea } from "@/components/ui/form";
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Input, Label, Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/form";
 import { CategoryIcon } from "@/components/ui/category-icon";
 import { Money } from "@/components/ui/money";
 import { TransactionDialog } from "@/components/transactions/transaction-dialog";
 import { useApp, useAppData } from "@/lib/app-context";
-import { parseCsv, templateCsv, transactionsToCsv, type ImportRow } from "@/lib/csv";
+import { transactionsToCsv } from "@/lib/csv";
 import { fmtDate, lastNMonths, monthKey, parseISO, format, todayISO } from "@/lib/dates";
+import { CHANNEL_LABEL, FLOW_TAB_LABEL, channelForSource, guessFlowTab } from "@/lib/flows";
 import { downloadBlob } from "@/lib/utils";
 import type { Transaction, TxType } from "@/lib/types";
 
 const PAGE_SIZE = 40;
+
+function flowLabelFor(t: Transaction) {
+  const tab = t.flowTab ?? guessFlowTab(t.merchant, t.categoryId, t.type)?.tab;
+  return tab ? FLOW_TAB_LABEL[tab] : null;
+}
+
+function needsFlowInfo(t: Transaction) {
+  if (t.transfer) return false;
+  if (t.categoryId === "cat_other" || !t.categoryId) return true;
+  return t.type === "expense" && t.flowTabSource === "fallback";
+}
 
 type Period = "month" | "last" | "3m" | "6m" | "year" | "all" | "custom";
 type Sort = "new" | "old" | "high" | "low";
@@ -53,7 +62,7 @@ const SORT_LABEL: Record<Sort, string> = {
 
 export default function TransactionsPage() {
   const data = useAppData();
-  const { addTransactions, deleteTransaction } = useApp();
+  const { session } = useApp();
   const currency = data.profile.currency;
   const categories = data.categories;
 
@@ -66,16 +75,9 @@ export default function TransactionsPage() {
   const [sort, setSort] = useState<Sort>("new");
   const [visible, setVisible] = useState(PAGE_SIZE);
 
-  const [addOpen, setAddOpen] = useState(false);
-  const [addType, setAddType] = useState<TxType>("expense");
   const [editing, setEditing] = useState<Transaction | null>(null);
-  const [deleteTarget, setDeleteTarget] = useState<Transaction | null>(null);
-
-  const [importOpen, setImportOpen] = useState(false);
-  const [csvText, setCsvText] = useState("");
-  const [fileName, setFileName] = useState<string | null>(null);
-  const [parsed, setParsed] = useState<{ rows: ImportRow[]; headers: string[]; fatal?: string } | null>(null);
-  const fileRef = useRef<HTMLInputElement>(null);
+  const [dialogFields, setDialogFields] = useState<"info" | "note">("note");
+  const [focusNotes, setFocusNotes] = useState(false);
 
   const categoryById = useMemo(() => new Map(categories.map((c) => [c.id, c])), [categories]);
 
@@ -150,98 +152,43 @@ export default function TransactionsPage() {
     toast.success("CSV exported", { description: `${filtered.length} transactions in ${currency}.` });
   }
 
-  function openAdd(nextType: TxType) {
-    setAddType(nextType);
-    setAddOpen(true);
+  function openInfo(t: Transaction) {
+    setDialogFields("info");
+    setFocusNotes(false);
+    setEditing(t);
   }
 
-  function handleFile(file?: File | null) {
-    if (!file) return;
-    if (!file.name.toLowerCase().endsWith(".csv") && file.type !== "text/csv") {
-      toast.error("Choose a .csv file.");
-      return;
-    }
-    const reader = new FileReader();
-    reader.onload = () => {
-      const text = String(reader.result ?? "");
-      setCsvText(text);
-      setFileName(file.name);
-      setParsed(parseCsv(text, categories, currency));
-    };
-    reader.onerror = () => toast.error("Could not read that file.");
-    reader.readAsText(file);
+  function openEdit(t: Transaction) {
+    setDialogFields("note");
+    setFocusNotes(false);
+    setEditing(t);
   }
 
-  function reviewPasted() {
-    if (!csvText.trim()) {
-      toast.error("Paste CSV rows or choose a file first.");
-      return;
-    }
-    setParsed(parseCsv(csvText, categories, currency));
+  function openNote(t: Transaction) {
+    setDialogFields("note");
+    setFocusNotes(true);
+    setEditing(t);
   }
-
-  function resetImport() {
-    setCsvText("");
-    setFileName(null);
-    setParsed(null);
-    if (fileRef.current) fileRef.current.value = "";
-  }
-
-  function runImport() {
-    if (!parsed) return;
-    const valid = parsed.rows.filter((r) => !r.error);
-    if (!valid.length) {
-      toast.error("No valid rows to import", { description: "Fix the errors and try again." });
-      return;
-    }
-    addTransactions(
-      valid.map((r) => ({
-        type: r.type,
-        amount: r.amount,
-        categoryId: r.categoryId,
-        merchant: r.merchant,
-        date: r.date,
-        paymentMethod: r.paymentMethod,
-        notes: r.notes,
-        source: "import" as const,
-      })),
-    );
-    toast.success(`${valid.length} transaction${valid.length === 1 ? "" : "s"} imported`, {
-      description: parsed.rows.length - valid.length > 0 ? `${parsed.rows.length - valid.length} invalid rows were skipped.` : "Categories were guessed where missing.",
-    });
-    setImportOpen(false);
-    resetImport();
-  }
-
-  function confirmDelete() {
-    if (!deleteTarget) return;
-    deleteTransaction(deleteTarget.id);
-    toast.success("Transaction deleted");
-    setDeleteTarget(null);
-  }
-
-  const validCount = parsed?.rows.filter((r) => !r.error).length ?? 0;
-  const invalidCount = (parsed?.rows.length ?? 0) - validCount;
 
   return (
     <div>
       <PageHeader
         title="Transactions"
-        description="Every rupee in and out, with receipt attachments and AI-assisted categories. Transfers are excluded from totals."
+        description="Every payment in and out, registered the moment it happens and tagged with the category and money flow it belongs to. Transfers are excluded from totals."
         actions={
-          <>
-            <Button variant="outline" size="sm" onClick={() => setImportOpen(true)}>
-              <Upload /> Import
-            </Button>
-            <Button variant="outline" size="sm" onClick={exportCsv} disabled={!filtered.length}>
-              <Download /> Export
-            </Button>
-            <Button size="sm" onClick={() => openAdd("expense")}>
-              <Plus /> Add transaction
-            </Button>
-          </>
+          <Button variant="outline" size="sm" onClick={exportCsv} disabled={!filtered.length}>
+            <Download /> Export
+          </Button>
         }
       />
+
+      {session?.provider === "demo" && (
+        <div className="mb-4">
+          <InfoNote icon={<Receipt />}>
+            Sample workspace — these transactions are seeded. A signed-in account's top-ups, payments and autopay runs register here immediately.
+          </InfoNote>
+        </div>
+      )}
 
       <div className="mb-4 grid grid-cols-3 gap-2 sm:mb-5 sm:gap-3">
         {[
@@ -353,13 +300,12 @@ export default function TransactionsPage() {
         <Card>
           <EmptyState
             icon={<Receipt />}
-            title="No transactions yet"
-            description="Add your first expense or income to unlock budgets, insights and your safe-to-spend number."
+            title="Waiting for transactions"
+            description="Payments are fetched from your connected PayPal account — nothing has arrived yet. Check the connection in Wallet & PayPal, and new incoming or outgoing payments will appear here automatically."
             action={
-              <div className="flex flex-wrap justify-center gap-2">
-                <Button onClick={() => openAdd("expense")}><Plus /> Add transaction</Button>
-                <Button variant="outline" onClick={() => setImportOpen(true)}><Upload /> Import CSV</Button>
-              </div>
+              <Button variant="outline" asChild>
+                <Link to="/app/wallet"><Receipt /> Open Wallet &amp; PayPal</Link>
+              </Button>
             }
           />
         </Card>
@@ -390,6 +336,7 @@ export default function TransactionsPage() {
               <tbody>
                 {shown.map((t) => {
                   const cat = categoryById.get(t.categoryId);
+                  const flow = flowLabelFor(t);
                   return (
                     <tr key={t.id} className="group border-b border-border/50 transition-colors last:border-0 hover:bg-muted/30">
                       <td className="px-4 py-3">
@@ -404,21 +351,42 @@ export default function TransactionsPage() {
                             <div className="flex items-center gap-1.5">
                               <p className="truncate font-medium text-foreground">{t.merchant}</p>
                               {t.transfer && <Badge variant="outline" className="px-1.5 py-0 text-[9.5px]">Transfer</Badge>}
-                              {t.source === "paypal" && !t.transfer && <Badge variant="outline" className="px-1.5 py-0 text-[9.5px]">PayPal</Badge>}
-                              {t.source === "autopay" && <Badge variant="outline" className="px-1.5 py-0 text-[9.5px]">Autopay</Badge>}
+                              {!t.transfer && ["paypal", "autopay", "import"].includes(channelForSource(t.source)) && (
+                                <Badge variant="outline" className="px-1.5 py-0 text-[9.5px]">{CHANNEL_LABEL[channelForSource(t.source)]}</Badge>
+                              )}
                             </div>
-                            <p className="truncate text-xs text-muted-foreground">
-                              {t.notes || (t.receiptName ? "Receipt attached" : t.paymentMethod)}
-                              {t.receiptName && <Paperclip className="ml-1 inline h-3 w-3" aria-label="Receipt attached" />}
-                            </p>
+                            <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                              {t.notes ? (
+                                <span className="truncate">{t.notes}</span>
+                              ) : (
+                                <button type="button" onClick={() => openNote(t)} className="inline-flex items-center gap-1 text-[11px] hover:text-primary hover:underline">
+                                  <StickyNote className="h-3 w-3" /> Add note
+                                </button>
+                              )}
+                              {t.receiptName && <Paperclip className="h-3 w-3 shrink-0" aria-label="Receipt attached" />}
+                            </div>
                           </div>
                         </div>
                       </td>
                       <td className="px-3 py-3">
-                        <span className="inline-flex items-center gap-1.5 text-[12.5px] text-muted-foreground">
-                          <span className="h-1.5 w-1.5 rounded-full" style={{ backgroundColor: cat?.color ?? "#64748b" }} aria-hidden />
-                          {cat?.name ?? "Other"}
-                        </span>
+                        <div className="flex flex-col items-start gap-1">
+                          <span className="inline-flex items-center gap-1.5 text-[12.5px] text-muted-foreground">
+                            <span className="h-1.5 w-1.5 rounded-full" style={{ backgroundColor: cat?.color ?? "#64748b" }} aria-hidden />
+                            {cat?.name ?? "Other"}
+                          </span>
+                          {flow && !needsFlowInfo(t) && (
+                            <span className="rounded-full bg-primary-soft/70 px-1.5 py-0.5 text-[9.5px] font-semibold text-accent-foreground">{flow}</span>
+                          )}
+                          {needsFlowInfo(t) && (
+                            <button
+                              type="button"
+                              onClick={() => openInfo(t)}
+                              className="inline-flex items-center gap-1 rounded-full bg-warning-soft px-1.5 py-0.5 text-[9.5px] font-semibold text-warning hover:underline"
+                            >
+                              <Tag className="h-2.5 w-2.5" /> Add info
+                            </button>
+                          )}
+                        </div>
                       </td>
                       <td className="hidden px-3 py-3 text-[12.5px] text-muted-foreground lg:table-cell">{t.paymentMethod}</td>
                       <td className="whitespace-nowrap px-3 py-3 text-[12.5px] text-muted-foreground">
@@ -433,11 +401,8 @@ export default function TransactionsPage() {
                       </td>
                       <td className="px-4 py-3">
                         <div className="flex items-center justify-end gap-0.5">
-                          <Button variant="ghost" size="icon-sm" onClick={() => setEditing(t)} aria-label={`Edit ${t.merchant}`}>
+                          <Button variant="ghost" size="icon-sm" onClick={() => openEdit(t)} aria-label={`Edit ${t.merchant}`}>
                             <Pencil />
-                          </Button>
-                          <Button variant="ghost" size="icon-sm" onClick={() => setDeleteTarget(t)} aria-label={`Delete ${t.merchant}`} className="hover:text-danger">
-                            <Trash2 />
                           </Button>
                         </div>
                       </td>
@@ -451,6 +416,7 @@ export default function TransactionsPage() {
           <ul className="space-y-2 md:hidden">
             {shown.map((t) => {
               const cat = categoryById.get(t.categoryId);
+              const flow = flowLabelFor(t);
               return (
                 <li key={t.id} className="rounded-2xl border border-border/80 bg-card p-3.5 shadow-soft">
                   <div className="flex items-start gap-3">
@@ -467,26 +433,44 @@ export default function TransactionsPage() {
                             <p className="truncate text-[13.5px] font-semibold">{t.merchant}</p>
                             {t.transfer && <Badge variant="outline" className="px-1.5 py-0 text-[9px]">Transfer</Badge>}
                           </div>
-                          <p className="mt-0.5 text-[11.5px] text-muted-foreground">{cat?.name ?? "Other"} · {fmtDate(t.date)}</p>
+                          <p className="mt-0.5 text-[11.5px] text-muted-foreground">
+                            {cat?.name ?? "Other"}
+                            {flow ? ` · ${flow}` : ""} · {fmtDate(t.date)}
+                          </p>
                         </div>
                         <span className={`tabular shrink-0 text-[14px] font-semibold ${t.type === "income" ? "text-success" : "text-foreground"}`}>
                           {t.type === "income" ? "+" : "−"}<Money value={t.amount} currency={currency} animate={false} />
                         </span>
                       </div>
-                      {(t.notes || t.receiptName) && (
-                        <p className="mt-1 line-clamp-1 text-[11.5px] text-muted-foreground">
-                          {t.receiptName && <Paperclip className="mr-1 inline h-3 w-3" aria-hidden />}
-                          {t.notes ?? "Receipt attached"}
-                        </p>
+                      <div className="mt-1 flex items-center gap-1.5 text-[11.5px] text-muted-foreground">
+                        {t.receiptName && <Paperclip className="h-3 w-3 shrink-0" aria-hidden />}
+                        {t.notes ? (
+                          <span className="line-clamp-1">{t.notes}</span>
+                        ) : (
+                          <button type="button" onClick={() => openNote(t)} className="inline-flex items-center gap-1 text-[11px] hover:text-primary">
+                            <StickyNote className="h-3 w-3" /> Add note
+                          </button>
+                        )}
+                      </div>
+                      {needsFlowInfo(t) && (
+                        <button
+                          type="button"
+                          onClick={() => openInfo(t)}
+                          className="mt-1.5 inline-flex items-center gap-1 rounded-full bg-warning-soft px-2 py-0.5 text-[10px] font-semibold text-warning"
+                        >
+                          <Tag className="h-3 w-3" /> Add info
+                        </button>
                       )}
                       <div className="mt-2 flex items-center justify-between">
-                        <span className="text-[11px] text-muted-foreground">{t.paymentMethod}</span>
+                        <span className="text-[11px] text-muted-foreground">
+                          {t.paymentMethod}
+                          {!t.transfer && channelForSource(t.source) !== "wallet_guardian" && channelForSource(t.source) !== "sample"
+                            ? ` · ${CHANNEL_LABEL[channelForSource(t.source)]}`
+                            : ""}
+                        </span>
                         <div className="flex gap-0.5">
-                          <Button variant="ghost" size="icon-sm" onClick={() => setEditing(t)} aria-label={`Edit ${t.merchant}`}>
+                          <Button variant="ghost" size="icon-sm" onClick={() => openEdit(t)} aria-label={`Edit ${t.merchant}`}>
                             <Pencil />
-                          </Button>
-                          <Button variant="ghost" size="icon-sm" onClick={() => setDeleteTarget(t)} aria-label={`Delete ${t.merchant}`} className="hover:text-danger">
-                            <Trash2 />
                           </Button>
                         </div>
                       </div>
@@ -509,147 +493,23 @@ export default function TransactionsPage() {
 
       <div className="mt-5">
         <InfoNote icon={<Search />}>
-          Categories are suggested from merchant names and can always be changed. Imported rows with an unmatched category fall back to AI guessing.
+          Each payment records where it was made and which money flow it belongs to. Payments with no match stay under Others in the smart budget; use Add info to pick a category and flow, and the expense moves there immediately. Notes are optional and private to this workspace.
         </InfoNote>
       </div>
 
-      <TransactionDialog open={addOpen} onOpenChange={setAddOpen} defaultType={addType} />
-      <TransactionDialog open={!!editing} onOpenChange={(open) => !open && setEditing(null)} existing={editing} />
-
-      <Dialog open={!!deleteTarget} onOpenChange={(open) => !open && setDeleteTarget(null)}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>Delete transaction?</DialogTitle>
-            <DialogDescription>
-              {deleteTarget && (
-                <>
-                  This will remove <strong className="text-foreground">{deleteTarget.merchant}</strong> for{" "}
-                  <strong className="text-foreground"><Money value={deleteTarget.amount} currency={currency} animate={false} /></strong> on {fmtDate(deleteTarget.date, "d MMM yyyy")}. Budgets and insights recalculate immediately.
-                </>
-              )}
-            </DialogDescription>
-          </DialogHeader>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setDeleteTarget(null)}>Cancel</Button>
-            <Button variant="destructive" onClick={confirmDelete}><Trash2 /> Delete</Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
-      <Dialog
-        open={importOpen}
+      <TransactionDialog
+        open={!!editing}
         onOpenChange={(open) => {
-          setImportOpen(open);
-          if (!open) resetImport();
+          if (!open) {
+            setEditing(null);
+            setFocusNotes(false);
+          }
         }}
-      >
-        <DialogContent wide>
-          <DialogHeader>
-            <DialogTitle>Import transactions from CSV</DialogTitle>
-            <DialogDescription>
-              Use columns for date, merchant and amount. Type, category, payment method and notes are matched when present. Amounts are read in {currency}.
-            </DialogDescription>
-          </DialogHeader>
+        existing={editing}
+        fields={dialogFields}
+        focusField={focusNotes ? "notes" : undefined}
+      />
 
-          <div className="space-y-4">
-            <div className="flex flex-col gap-2 rounded-xl border border-dashed border-border p-4 sm:flex-row sm:items-center sm:justify-between">
-              <div className="flex items-center gap-3">
-                <span className="flex h-10 w-10 items-center justify-center rounded-xl bg-primary-soft text-primary"><FileSpreadsheet className="h-5 w-5" /></span>
-                <div>
-                  <p className="text-[13px] font-medium">{fileName ?? "Choose a .csv file"}</p>
-                  <p className="text-[11.5px] text-muted-foreground">Or paste rows below. Nothing leaves your browser.</p>
-                </div>
-              </div>
-              <div className="flex gap-2">
-                <input ref={fileRef} type="file" accept=".csv,text/csv" className="hidden" onChange={(e) => handleFile(e.target.files?.[0])} aria-label="Choose CSV file" />
-                <Button type="button" variant="outline" size="sm" onClick={() => fileRef.current?.click()}><Upload /> Choose file</Button>
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="sm"
-                  onClick={() => {
-                    downloadBlob("wallet-guardian-import-template.csv", templateCsv(currency));
-                    toast.success("Template downloaded");
-                  }}
-                >
-                  <Download /> Template
-                </Button>
-              </div>
-            </div>
-
-            <div className="space-y-1.5">
-              <Label htmlFor="csv-paste">Paste CSV</Label>
-              <Textarea
-                id="csv-paste"
-                value={csvText}
-                onChange={(e) => {
-                  setCsvText(e.target.value);
-                  setParsed(null);
-                }}
-                placeholder={"date,merchant,amount,type,category,payment_method\n2026-11-01,Swiggy,420,expense,Food & Dining,UPI"}
-                className="min-h-[110px] font-mono text-[12px]"
-                spellCheck={false}
-              />
-            </div>
-
-            <div className="flex justify-end">
-              <Button type="button" variant="soft" size="sm" onClick={reviewPasted} disabled={!csvText.trim()}>Review rows</Button>
-            </div>
-
-            {parsed?.fatal && (
-              <div role="alert" className="flex items-start gap-2 rounded-xl border border-danger/25 bg-danger-soft px-3 py-2.5 text-[12.5px] font-medium text-danger">
-                <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" /> {parsed.fatal}
-              </div>
-            )}
-
-            {parsed && !parsed.fatal && (
-              <div className="space-y-3">
-                <div className="flex flex-wrap items-center gap-2 text-[12px]">
-                  <Badge variant="success">{validCount} ready</Badge>
-                  {invalidCount > 0 && <Badge variant="danger">{invalidCount} with errors</Badge>}
-                  <span className="text-muted-foreground">Detected columns: {parsed.headers.join(", ") || "none"}</span>
-                </div>
-                <div className="max-h-64 overflow-auto rounded-xl border border-border">
-                  <table className="w-full text-[12px]">
-                    <thead className="sticky top-0 bg-muted/90 backdrop-blur">
-                      <tr className="text-left text-[10.5px] uppercase tracking-wider text-muted-foreground">
-                        <th scope="col" className="px-3 py-2">Date</th>
-                        <th scope="col" className="px-3 py-2">Merchant</th>
-                        <th scope="col" className="px-3 py-2">Category</th>
-                        <th scope="col" className="px-3 py-2 text-right">Amount</th>
-                        <th scope="col" className="px-3 py-2">Status</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {parsed.rows.map((r) => (
-                        <tr key={r.index} className={r.error ? "bg-danger-soft/40" : "border-t border-border/50"}>
-                          <td className="whitespace-nowrap px-3 py-2 text-muted-foreground">{r.error ? "—" : fmtDate(r.date, "d MMM yyyy")}</td>
-                          <td className="max-w-[160px] truncate px-3 py-2">{r.merchant || "—"}</td>
-                          <td className="max-w-[130px] truncate px-3 py-2 text-muted-foreground">{r.categoryName}</td>
-                          <td className={`tabular whitespace-nowrap px-3 py-2 text-right ${r.type === "income" ? "text-success" : ""}`}>
-                            {r.type === "income" ? "+" : "−"}<Money value={r.amount} currency={currency} animate={false} />
-                          </td>
-                          <td className="px-3 py-2">
-                            {r.error ? <span className="text-[11px] font-medium text-danger">{r.error}</span> : <span className="text-[11px] text-success">Ready</span>}
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-                {invalidCount > 0 && <p className="text-[11.5px] text-muted-foreground">Rows with errors are skipped. Fix them in your file and import again for the rest.</p>}
-              </div>
-            )}
-          </div>
-
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setImportOpen(false)}>Cancel</Button>
-            <Button onClick={runImport} disabled={!parsed || !!parsed.fatal || validCount === 0}>
-              <Upload /> Import {validCount > 0 ? validCount : ""} row{validCount === 1 ? "" : "s"}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
     </div>
   );
 }

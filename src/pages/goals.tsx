@@ -38,7 +38,7 @@ const GOAL_COLORS = ["#059669", "#4f46e5", "#d97706", "#e11d48", "#0d9488", "#7c
 
 export default function GoalsPage() {
   const data = useAppData();
-  const { addGoal, updateGoal, deleteGoal, contributeToGoal } = useApp();
+  const { addGoal, updateGoal, deleteGoal, contributeToGoal, withdrawFromGoal } = useApp();
   const currency = data.profile.currency;
 
   const [formOpen, setFormOpen] = useState(false);
@@ -105,27 +105,34 @@ export default function GoalsPage() {
       toast.error("Pick a deadline in the future.");
       return;
     }
+    const startInr = Math.min(parseToInr(savedStart || "0", currency), targetInr);
     if (editing) {
+      const prevSaved = editing.saved;
       updateGoal(editing.id, {
         name: name.trim(),
         target: targetInr,
-        saved: Math.min(parseToInr(savedStart || "0", currency), targetInr),
+        saved: startInr,
         deadline,
         autoMonthly: autoInr,
         icon,
         color,
       });
+      // Changing the saved amount moves wallet money to match, with rows.
+      const delta = startInr - prevSaved;
+      if (delta > 0) contributeToGoal(editing.id, delta);
+      else if (delta < 0) withdrawFromGoal(editing.id, -delta);
       toast.success("Goal updated");
     } else {
-      addGoal({
+      const goal = addGoal({
         name: name.trim(),
         target: targetInr,
-        saved: Math.min(parseToInr(savedStart || "0", currency), targetInr),
+        saved: 0,
         deadline,
         autoMonthly: autoInr,
         icon,
         color,
       });
+      if (startInr > 0) contributeToGoal(goal.id, startInr);
       toast.success("Goal created", { description: autoInr > 0 ? `${formatMoney(autoInr, currency)} will be tracked monthly.` : "Add a monthly contribution to stay on track." });
     }
     setFormOpen(false);
@@ -162,7 +169,11 @@ export default function GoalsPage() {
   function confirmDelete() {
     if (!deleteTarget) return;
     deleteGoal(deleteTarget.id);
-    toast.success("Goal deleted", { description: "Your saved amount in this vault is no longer tracked." });
+    toast.success("Goal deleted", {
+      description: deleteTarget.saved > 0
+        ? `${formatMoney(deleteTarget.saved, currency)} was refunded to your PayPal wallet.`
+        : "Nothing was saved in this vault.",
+    });
     setDeleteTarget(null);
   }
 
@@ -444,7 +455,10 @@ export default function GoalsPage() {
         <DialogContent>
           <DialogHeader>
             <DialogTitle>Delete {deleteTarget?.name}?</DialogTitle>
-            <DialogDescription>This removes the vault and its saved amount from Wallet Guardian. Wallet money already moved stays where it is.</DialogDescription>
+            <DialogDescription>
+              This removes the vault. Everything saved in it — {formatMoney(deleteTarget?.saved ?? 0, currency)} — is refunded to your
+              PayPal wallet and registered as a transaction, so the balance always matches the ledger.
+            </DialogDescription>
           </DialogHeader>
           <DialogFooter>
             <Button variant="outline" onClick={() => setDeleteTarget(null)}>Keep it</Button>

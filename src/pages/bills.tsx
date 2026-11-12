@@ -202,7 +202,9 @@ export default function BillsPage() {
       <PageHeader
         title="Bills & tickets"
         description="What's due, what's overdue and what autopay will handle. Mark a bill paid and optionally record it as an expense."
-        actions={<Button size="sm" onClick={openAdd}><Plus /> Add bill</Button>}
+        actions={
+          <Button size="sm" onClick={openAdd}><Plus /> Add bill</Button>
+        }
       />
 
       <div className="mb-4 grid grid-cols-2 gap-2.5 sm:gap-3 lg:grid-cols-4">

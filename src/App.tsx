@@ -16,17 +16,16 @@ import LandingPage from "@/pages/landing";
 import AuthPage from "@/pages/auth";
 
 const OnboardingPage = lazy(() => import("@/pages/onboarding"));
-const SetupPage = lazy(() => import("@/pages/setup"));
 const DashboardPage = lazy(() => import("@/pages/dashboard"));
 const TransactionsPage = lazy(() => import("@/pages/transactions"));
 const BudgetPage = lazy(() => import("@/pages/budget"));
 const AnalyticsPage = lazy(() => import("@/pages/analytics"));
 const SubscriptionsPage = lazy(() => import("@/pages/subscriptions"));
+const MoneyFlowsPage = lazy(() => import("@/pages/flows"));
 const BillsPage = lazy(() => import("@/pages/bills"));
 const RemindersPage = lazy(() => import("@/pages/reminders"));
 const GoalsPage = lazy(() => import("@/pages/goals"));
 const WalletPage = lazy(() => import("@/pages/wallet"));
-const AutopayPage = lazy(() => import("@/pages/autopay"));
 const GuardianPage = lazy(() => import("@/pages/guardian"));
 const ShopperPage = lazy(() => import("@/pages/shopper"));
 const SettingsPage = lazy(() => import("@/pages/settings"));
@@ -134,20 +133,20 @@ function AppRoutes() {
       <Routes>
       <Route path="/" element={<LandingPage />} />
       <Route path="/login" element={<GuestOnly><AuthPage /></GuestOnly>} />
-      <Route path="/setup" element={<SetupPage />} />
       <Route path="/signup" element={<Navigate to="/login" replace />} />
       <Route path="/onboarding" element={<OnboardingGuard><OnboardingPage /></OnboardingGuard>} />
       <Route path="/app" element={<RequireSession><AppShell /></RequireSession>}>
         <Route index element={<DashboardPage />} />
         <Route path="transactions" element={<TransactionsPage />} />
         <Route path="budget" element={<BudgetPage />} />
+        <Route path="flows/:tab" element={<MoneyFlowsPage />} />
         <Route path="analytics" element={<AnalyticsPage />} />
         <Route path="subscriptions" element={<SubscriptionsPage />} />
         <Route path="bills" element={<BillsPage />} />
         <Route path="reminders" element={<RemindersPage />} />
         <Route path="goals" element={<GoalsPage />} />
         <Route path="wallet" element={<WalletPage />} />
-        <Route path="autopay" element={<AutopayPage />} />
+        <Route path="autopay" element={<Navigate to="/app/flows/autopay" replace />} />
         <Route path="guardian" element={<GuardianPage />} />
         <Route path="shopper" element={<ShopperPage />} />
         <Route path="settings" element={<SettingsPage />} />

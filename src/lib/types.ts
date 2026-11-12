@@ -2,6 +2,10 @@ export type Currency = "INR" | "USD" | "EUR";
 export type TxType = "income" | "expense";
 export type EnvelopeGroup = "necessities" | "wants" | "savings";
 
+/** Where a recorded payment came from. */
+export type PaymentChannel = "wallet_guardian" | "paypal" | "autopay" | "import" | "sample";
+export type FlowTabSource = "auto" | "manual" | "fallback";
+
 export interface Category {
   id: string;
   name: string;
@@ -33,8 +37,17 @@ export interface Transaction {
   paypalOrderId?: string;
   paypalCaptureId?: string;
   transfer?: boolean;
+  /** Money flow tab this payment belongs to, resolved from category, merchant or a manual tag. */
+  flowTab?: FlowTab;
+  flowTabSource?: FlowTabSource;
+  /** Where the payment was recorded: this app, PayPal, autopay, an import or sample data. */
+  channel?: PaymentChannel;
+  /** Imported from PayPal with no app-side info yet — shows an Add info button and counts as Others until filled in. */
+  needsInfo?: boolean;
   createdAt: string;
 }
+
+export type NewTransaction = Omit<Transaction, "id" | "createdAt" | "source"> & { source?: Transaction["source"] };
 
 export interface FixedObligation {
   id: string;
@@ -114,6 +127,35 @@ export interface Bill {
   status: "upcoming" | "due" | "paid" | "overdue";
   paidAt?: string;
   autopay?: boolean;
+  createdAt: string;
+}
+
+export type FlowTab =
+  | "subscriptions"
+  | "bills"
+  | "emis"
+  | "autopay"
+  | "donations"
+  | "health"
+  | "education"
+  | "groceries"
+  | "others";
+
+export interface FlowExpense {
+  id: string;
+  name: string;
+  amount: number; // INR base, per cycle
+  tab: FlowTab;
+  status: "active" | "paused";
+  note?: string;
+  /** Next due date for manual expenses; autopay schedules drive their own dates. */
+  dueDate?: string;
+  /** Links to the ScheduledPayment that sends the money. */
+  autopayId?: string;
+  source: "manual" | "onboarding";
+  obligationId?: string;
+  /** Legacy subscription or bill this flow was imported from. */
+  legacyId?: string;
   createdAt: string;
 }
 
@@ -248,6 +290,11 @@ export interface UserData {
   goals: Goal[];
   subscriptions: Subscription[];
   bills: Bill[];
+  flowExpenses: FlowExpense[];
+  /** True once onboarding obligations have been copied into flowExpenses. */
+  flowsInitialized?: boolean;
+  /** True once existing subscriptions and unpaid bills have been imported as flows. */
+  legacyFlowsMerged?: boolean;
   reminders: Reminder[];
   scheduledPayments: ScheduledPayment[];
   insights: AiInsight[];
@@ -257,17 +304,25 @@ export interface UserData {
   products: MockProduct[];
   prices: MockPrice[];
   offers: MockOffer[];
+  notifications: AppNotification[];
   seeded: boolean;
+}
+
+/** In-app notification (incoming transfer, scheduled payment, credits). */
+export interface AppNotification {
+  id: string;
+  kind: "transfer_received" | "payment_sent" | "credit" | "info";
+  title: string;
+  body: string;
+  createdAt: string;
+  read?: boolean;
 }
 
 export interface Session {
   userId: string;
   email: string;
   name: string;
-  provider: "paypal" | "demo";
-  payerId?: string;
-  env: "live" | "sandbox";
-  verified?: boolean;
-  accountStatus?: string;
+  provider: "email" | "demo";
+  env: "sandbox";
   signedInAt: string;
 }

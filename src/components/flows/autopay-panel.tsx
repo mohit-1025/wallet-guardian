@@ -1,11 +1,11 @@
 import { useMemo, useState } from "react";
 import {
   CalendarClock, CheckCircle2, ChevronDown, FlaskConical, History, Pause, Pencil,
-  Play, Plus, RotateCcw, ShieldCheck, Sparkles, Trash2, XCircle,
+  Play, Plus, RotateCcw, Trash2, XCircle,
 } from "lucide-react";
 import { toast } from "sonner";
-import { PageHeader, Avatar, Badge, EmptyState, InfoNote, Spinner } from "@/components/ui/misc";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Avatar, Badge, EmptyState, Spinner } from "@/components/ui/misc";
+import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input, Label, Select, SelectContent, SelectItem, SelectTrigger, SelectValue, Textarea } from "@/components/ui/form";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -17,15 +17,6 @@ import { daysUntil, fmtDate, todayISO } from "@/lib/dates";
 import { formatAmountInput, formatMoney, parseToInr } from "@/lib/money";
 import type { PaymentRun, ScheduledPayment } from "@/lib/types";
 import { cn } from "@/lib/utils";
-
-type Filter = "active" | "paused" | "completed" | "all";
-
-const FILTER_LABEL: Record<Filter, string> = {
-  active: "Active",
-  paused: "Paused",
-  completed: "Completed",
-  all: "All",
-};
 
 const FREQUENCY_LABEL: Record<ScheduledPayment["frequency"], string> = {
   once: "One-time",
@@ -51,34 +42,20 @@ const STATUS_META: Record<ScheduledPayment["status"], { label: string; variant: 
   cancelled: { label: "Cancelled", variant: "danger" },
 };
 
-function monthlyEquivalent(p: ScheduledPayment) {
-  if (p.frequency === "monthly") return p.amount;
-  if (p.frequency === "weekly") return Math.round((p.amount * 52) / 12);
-  return 0;
-}
-
-function amountInNext30(p: ScheduledPayment) {
-  if (p.status !== "active") return 0;
-  const days = daysUntil(p.nextRunDate);
-  if (days > 30) return 0;
-  if (p.frequency === "weekly") {
-    const start = Math.max(0, days);
-    return (Math.floor((30 - start) / 7) + 1) * p.amount;
-  }
-  return p.amount;
-}
-
-export default function AutopayPage() {
+export function AutopayPanel({
+  title = "Scheduled payouts",
+  hint = "PayPal payouts you can run on demand",
+}: {
+  title?: string;
+  hint?: string;
+}) {
   const data = useAppData();
-  const { session, addScheduledPayment, updateScheduledPayment, deleteScheduledPayment, recordScheduledRun } = useApp();
+  const { session, updateScheduledPayment, deleteScheduledPayment, addScheduledPayment, recordScheduledRun, updateFlowExpense } = useApp();
   const { status: integration } = useIntegration();
   const currency = data.profile.currency;
-  const live = session?.env === "live";
   const canPayout = session?.provider === "demo" || integration.capabilities.businessPayouts;
 
-  const [filter, setFilter] = useState<Filter>("active");
   const [expanded, setExpanded] = useState<string[]>([]);
-
   const [formOpen, setFormOpen] = useState(false);
   const [editing, setEditing] = useState<ScheduledPayment | null>(null);
   const [payeeName, setPayeeName] = useState("");
@@ -94,32 +71,19 @@ export default function AutopayPage() {
   const [running, setRunning] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<ScheduledPayment | null>(null);
 
-  const counts = useMemo(() => {
-    const active = data.scheduledPayments.filter((p) => p.status === "active");
-    const paused = data.scheduledPayments.filter((p) => p.status === "paused");
-    const finished = data.scheduledPayments.filter((p) => p.status === "completed" || p.status === "cancelled");
-    const runs = data.scheduledPayments.flatMap((p) => p.history);
-    return {
-      active: active.length,
-      paused: paused.length,
-      monthly: active.reduce((sum, p) => sum + monthlyEquivalent(p), 0),
-      next30: data.scheduledPayments.reduce((sum, p) => sum + amountInNext30(p), 0),
-      runCount: runs.filter((r) => r.status === "paid" || r.status === "simulated").length,
-      failedCount: runs.filter((r) => r.status === "failed").length,
-      finished: finished.length,
-    };
-  }, [data.scheduledPayments]);
+  const rows = useMemo(
+    () =>
+      [...data.scheduledPayments].sort((a, b) => {
+        if (a.status === "active" && b.status !== "active") return -1;
+        if (b.status === "active" && a.status !== "active") return 1;
+        return a.nextRunDate.localeCompare(b.nextRunDate);
+      }),
+    [data.scheduledPayments],
+  );
 
-  const rows = useMemo(() => {
-    const base = filter === "all" ? data.scheduledPayments : filter === "completed"
-      ? data.scheduledPayments.filter((p) => p.status === "completed" || p.status === "cancelled")
-      : data.scheduledPayments.filter((p) => p.status === filter);
-    return [...base].sort((a, b) => {
-      if (a.status === "active" && b.status !== "active") return -1;
-      if (b.status === "active" && a.status !== "active") return 1;
-      return a.nextRunDate.localeCompare(b.nextRunDate);
-    });
-  }, [data.scheduledPayments, filter]);
+  function linkedFlow(scheduleId: string) {
+    return data.flowExpenses.find((f) => f.autopayId === scheduleId);
+  }
 
   function openAdd() {
     setEditing(null);
@@ -192,19 +156,30 @@ export default function AutopayPage() {
 
   function togglePause(payment: ScheduledPayment) {
     const paused = payment.status === "paused";
-    updateScheduledPayment(payment.id, { status: paused ? "active" : "paused" });
-    toast.success(paused ? "Schedule resumed" : "Schedule paused");
+    const status = paused ? "active" : "paused";
+    updateScheduledPayment(payment.id, { status });
+    const flow = linkedFlow(payment.id);
+    if (flow) updateFlowExpense(flow.id, { status });
+    toast.success(paused ? "Schedule resumed" : "Schedule paused", {
+      description: flow ? "The linked expense follows this status." : undefined,
+    });
   }
 
   function reactivate(payment: ScheduledPayment) {
     updateScheduledPayment(payment.id, { status: "active", nextRunDate: payment.startDate });
+    const flow = linkedFlow(payment.id);
+    if (flow) updateFlowExpense(flow.id, { status: "active" });
     toast.success("Schedule reactivated", { description: `Next run on ${fmtDate(payment.startDate, "d MMM yyyy")}.` });
   }
 
   function confirmDelete() {
     if (!deleteTarget) return;
+    const flow = linkedFlow(deleteTarget.id);
+    if (flow) updateFlowExpense(flow.id, { autopayId: undefined });
     deleteScheduledPayment(deleteTarget.id);
-    toast.success("Schedule deleted");
+    toast.success("Schedule deleted", {
+      description: flow ? `${flow.name} stays as a manual expense.` : undefined,
+    });
     setDeleteTarget(null);
   }
 
@@ -223,12 +198,14 @@ export default function AutopayPage() {
         note: runTarget.note || "Wallet Guardian autopay",
         payment: runTarget,
       });
+      // Whatever the sandbox answered, the run registers its expense and the
+      // wallet is debited (recordScheduledRun handles both paid & simulated).
       recordScheduledRun(runTarget.id, {
         status: res.simulated ? "simulated" : "paid",
         paypalBatchId: res.batchId,
         note: res.simulated ? res.message ?? "Simulated sandbox payout" : `PayPal batch ${res.status}`,
       });
-      toast.success(res.simulated ? "Simulated payout recorded" : live ? "Live payout sent" : "Payout sent in the PayPal sandbox", {
+      toast.success(res.simulated ? "Simulated payout recorded" : "Payout sent in the PayPal sandbox", {
         description: res.simulated
           ? `${res.message ?? "Payouts are not enabled"} Batch ${res.batchId}.`
           : `Batch ${res.batchId} · ${res.status}.`,
@@ -245,82 +222,26 @@ export default function AutopayPage() {
     setExpanded((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
   }
 
-  const nextRun = data.scheduledPayments
-    .filter((p) => p.status === "active")
-    .sort((a, b) => a.nextRunDate.localeCompare(b.nextRunDate))[0];
-
   return (
-    <div>
-      <PageHeader
-        title="Autopay"
-        description="Scheduled PayPal payouts to people you trust — rent, lessons, family support. Run them on demand or let the schedule track what's next."
-        actions={<Button size="sm" onClick={openAdd}><Plus /> New scheduled payment</Button>}
-      />
-
-      <div className="mb-4 grid grid-cols-2 gap-2.5 sm:gap-3 lg:grid-cols-4">
-        {[
-          { label: "Monthly commitment", value: counts.monthly, sub: "Recurring active schedules", tone: "text-foreground", money: true },
-          { label: "Next 30 days", value: counts.next30, sub: nextRun ? `Next: ${nextRun.payeeName} · ${fmtDate(nextRun.nextRunDate, "d MMM")}` : "Nothing scheduled", tone: "text-foreground", money: true },
-          { label: "Active schedules", value: counts.active, sub: `${counts.paused} paused · ${counts.finished} finished`, tone: "text-foreground", money: false },
-          { label: "Payout runs", value: counts.runCount, sub: counts.failedCount ? `${counts.failedCount} failed` : "No failed runs", tone: counts.failedCount ? "text-danger" : "text-success", money: false },
-        ].map((stat) => (
-          <Card key={stat.label} className="p-3.5 sm:p-4">
-            <p className="text-[11px] font-medium text-muted-foreground sm:text-xs">{stat.label}</p>
-            <p className={cn("mt-1 text-lg font-semibold tracking-tight tabular sm:text-xl", stat.tone)}>
-              {stat.money ? <Money value={stat.value} currency={currency} /> : stat.value}
-            </p>
-            <p className="mt-0.5 truncate text-[10.5px] text-muted-foreground">{stat.sub}</p>
-          </Card>
-        ))}
-      </div>
-
-      <InfoNote className="mb-4" icon={live ? <ShieldCheck /> : <FlaskConical />}>
-        {live
-          ? canPayout
-            ? "Live payouts are sent from the PayPal business account named in PAYPAL_BUSINESS_EMAILS. Every run moves real money and is recorded in your ledger."
-            : "Live payouts are limited to the app owner's PayPal business account. This login can still pay from its own account with Wallet → Pay someone."
-          : !integration.configured
-            ? "PayPal sandbox credentials aren't configured, so every demo payout is simulated, labelled, and fully local. No money can move."
-            : integration.payoutsEnabled
-              ? "Payouts are enabled on the server's PayPal sandbox account. Batch IDs come from the sandbox API."
-              : "The sandbox account can't send payouts. Runs fall back to a labelled simulation and still record history."}
-      </InfoNote>
-
+    <>
       <Card>
-        <CardHeader className="flex-row flex-wrap items-center justify-between gap-3">
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border/60 px-4 py-3.5">
           <div className="flex items-center gap-2">
-            <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-primary-soft text-primary"><CalendarClock className="h-3.5 w-3.5" /></span>
+            <span className="flex h-8 w-8 items-center justify-center rounded-xl bg-primary-soft text-primary"><CalendarClock className="h-4 w-4" /></span>
             <div>
-              <CardTitle>Scheduled payouts</CardTitle>
-              <p className="text-[11px] text-muted-foreground">{data.scheduledPayments.length} schedules in your ledger</p>
+              <h3 className="text-[13.5px] font-semibold">{title}</h3>
+              <p className="text-[11px] text-muted-foreground">{hint} · {rows.length} in your ledger</p>
             </div>
           </div>
-          <div className="flex flex-wrap gap-1 rounded-xl bg-muted/50 p-1">
-            {(Object.keys(FILTER_LABEL) as Filter[]).map((key) => {
-              const count = key === "all" ? data.scheduledPayments.length : key === "completed" ? counts.finished : key === "active" ? counts.active : counts.paused;
-              return (
-                <button
-                  key={key}
-                  type="button"
-                  onClick={() => setFilter(key)}
-                  aria-pressed={filter === key}
-                  className={cn(
-                    "rounded-lg px-2.5 py-1.5 text-[11.5px] font-semibold transition-colors",
-                    filter === key ? "bg-card text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground",
-                  )}
-                >
-                  {FILTER_LABEL[key]} <span className="tabular opacity-60">{count}</span>
-                </button>
-              );
-            })}
-          </div>
-        </CardHeader>
-        <CardContent>
+          <Button size="sm" variant="outline" onClick={openAdd}><Plus /> New scheduled payment</Button>
+        </div>
+
+        <div className="p-3.5">
           {rows.length === 0 ? (
             <EmptyState
               icon={<CalendarClock />}
-              title={filter === "active" ? "No active autopays" : filter === "paused" ? "Nothing paused" : filter === "completed" ? "No finished schedules" : "No schedules yet"}
-              description={`Set up a recurring or one-time PayPal payout, then run it whenever you're ready. ${live ? "Live payouts come from the allowlisted business account." : "Sandbox only — no real money moves."}`}
+              title="No schedules yet"
+              description="Set up a recurring or one-time PayPal payout, then run it whenever you're ready. Sandbox only — no real money moves."
               action={<Button size="sm" onClick={openAdd}><Plus /> New scheduled payment</Button>}
               className="py-8"
             />
@@ -330,8 +251,9 @@ export default function AutopayPage() {
                 const meta = STATUS_META[payment.status];
                 const historyOpen = expanded.includes(payment.id);
                 const dueSoon = payment.status === "active" && daysUntil(payment.nextRunDate) <= 3;
+                const flow = linkedFlow(payment.id);
                 return (
-                  <div key={payment.id} className="rounded-2xl border border-border/70">
+                  <div key={payment.id} className={cn("rounded-2xl border border-border/70", payment.status === "paused" && "bg-muted/20")}>
                     <div className="flex flex-col gap-3 p-3.5 sm:flex-row sm:items-center">
                       <Avatar name={payment.payeeName} className="h-10 w-10" />
                       <div className="min-w-0 flex-1">
@@ -339,6 +261,7 @@ export default function AutopayPage() {
                           <p className="text-[13px] font-semibold">{payment.payeeName}</p>
                           <Badge variant={meta.variant}>{meta.label}</Badge>
                           <Badge variant="outline">{FREQUENCY_LABEL[payment.frequency]}</Badge>
+                          {flow && <Badge variant="default">{flow.name}</Badge>}
                           {dueSoon && <Badge variant="warning">Due soon</Badge>}
                         </div>
                         <p className="mt-0.5 truncate text-[11px] text-muted-foreground">
@@ -360,7 +283,7 @@ export default function AutopayPage() {
                       <div className="flex flex-wrap items-center gap-1">
                         {(payment.status === "active" || payment.status === "paused") && (
                           <>
-                            <Button size="sm" variant="outline" onClick={() => setRunTarget(payment)} disabled={live}>
+                            <Button size="sm" variant="outline" onClick={() => setRunTarget(payment)}>
                               <Play /> Run now
                             </Button>
                             <Button variant="ghost" size="icon-sm" onClick={() => togglePause(payment)} aria-label={payment.status === "paused" ? `Resume payment to ${payment.payeeName}` : `Pause payment to ${payment.payeeName}`}>
@@ -391,7 +314,7 @@ export default function AutopayPage() {
                           <span className="font-normal">· {payment.history.length} runs</span>
                         </div>
                         {payment.history.length === 0 ? (
-                          <p className="mt-2 text-[11.5px] text-muted-foreground">No runs yet. Use Run now to record the first {live ? "live" : "sandbox"} payout.</p>
+                          <p className="mt-2 text-[11.5px] text-muted-foreground">No runs yet. Use Run now to record the first sandbox payout.</p>
                         ) : (
                           <div className="mt-2 divide-y divide-border/50">
                             {payment.history.slice(0, 5).map((run) => {
@@ -418,20 +341,11 @@ export default function AutopayPage() {
               })}
             </div>
           )}
-        </CardContent>
+        </div>
       </Card>
 
-      <InfoNote className="mt-4" icon={<Sparkles />}>
-        {live
-          ? canPayout
-            ? "Runs are manual: press Run now and the server sends a real PayPal payout from the allowlisted business account. Each run records an expense and debits the PayPal wallet."
-            : "Live payouts are limited to the app owner's business account. Use Wallet → Pay someone to approve each payment from your own PayPal account."
-          : "Autopay runs are manual in this sandbox: press Run now and the server attempts a PayPal sandbox payout, falling back to a labelled simulation when payouts aren't enabled. Runs record an expense and debit the sandbox wallet."}{" "}
-        Suggestions are not financial advice.
-      </InfoNote>
-
       <Dialog open={formOpen} onOpenChange={setFormOpen}>
-        <DialogContent>
+        <DialogContent className="sm:!w-[min(94vw,560px)]">
           <DialogHeader>
             <DialogTitle>{editing ? "Edit scheduled payment" : "New scheduled payment"}</DialogTitle>
             <DialogDescription>Send a PayPal payout to a person on a schedule you control.</DialogDescription>
@@ -465,7 +379,7 @@ export default function AutopayPage() {
               </div>
             </div>
             <div className="space-y-1.5">
-              <Label>Frequency</Label>
+              <Label>Repeat after</Label>
               <div className="grid grid-cols-3 gap-1 rounded-xl bg-muted/50 p-1">
                 {(["once", "weekly", "monthly"] as const).map((key) => (
                   <button
@@ -485,7 +399,7 @@ export default function AutopayPage() {
             </div>
             <div className="grid gap-3 sm:grid-cols-2">
               <div className="space-y-1.5">
-                <Label htmlFor="ap-start">Start date</Label>
+                <Label htmlFor="ap-start">First payment</Label>
                 <Input id="ap-start" type="date" value={startDate} onChange={(e) => setStartDate(e.target.value)} />
               </div>
               <div className="space-y-1.5">
@@ -494,18 +408,16 @@ export default function AutopayPage() {
               </div>
             </div>
             <div className="space-y-1.5">
-              <Label htmlFor="ap-note">Note</Label>
+              <Label htmlFor="ap-note">Note <span className="font-normal text-muted-foreground">(optional)</span></Label>
               <Textarea id="ap-note" value={note} onChange={(e) => setNote(e.target.value)} placeholder="e.g. Monthly rent — Koramangala" className="min-h-[70px]" />
             </div>
             {editing && startDate !== editing.startDate && (
-              <p className="text-[10.5px] text-muted-foreground">Changing the start date also sets the next run to {fmtDate(startDate, "d MMM yyyy")}.</p>
+              <p className="text-[10.5px] text-muted-foreground">Changing the first payment date also sets the next run to {fmtDate(startDate, "d MMM yyyy")}.</p>
             )}
-            <div className="flex items-center gap-1.5 rounded-xl border border-border/60 bg-muted/20 px-3 py-2 text-[10.5px] text-muted-foreground">
-              {live ? <ShieldCheck className="h-3 w-3 shrink-0" /> : <FlaskConical className="h-3 w-3 shrink-0" />}
-              {live
-                ? "Live payouts: the payee email must belong to a real PayPal account, and Payouts must be enabled for the Wallet Guardian business account."
-                : "Sandbox only. The payee email must belong to a PayPal sandbox test account for real sandbox API calls, otherwise the run is simulated."}
-            </div>
+            <p className="flex items-start gap-1.5 text-[10.5px] leading-relaxed text-muted-foreground">
+              <FlaskConical className="mt-0.5 h-3 w-3 shrink-0" />
+              Sandbox only. The payee email must belong to a PayPal sandbox test account for real sandbox API calls, otherwise the run is simulated.
+            </p>
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setFormOpen(false)}>Cancel</Button>
@@ -520,7 +432,7 @@ export default function AutopayPage() {
             <DialogTitle>Run payout now?</DialogTitle>
             <DialogDescription>
               {runTarget
-                ? `${formatMoney(runTarget.amount, currency)} to ${runTarget.payeeName} (${runTarget.payeeEmail}). This creates a ${live ? "live PayPal" : "PayPal sandbox"} payout batch and records the run in your history.`
+                ? `${formatMoney(runTarget.amount, currency)} to ${runTarget.payeeName} (${runTarget.payeeEmail}). This creates a PayPal sandbox payout batch and records the run in your history.`
                 : ""}
             </DialogDescription>
           </DialogHeader>
@@ -541,14 +453,10 @@ export default function AutopayPage() {
             </div>
           )}
           <p className="flex items-start gap-1.5 text-[10.5px] leading-relaxed text-muted-foreground">
-            {live ? <ShieldCheck className="mt-0.5 h-3 w-3 shrink-0" /> : <FlaskConical className="mt-0.5 h-3 w-3 shrink-0" />}
-            {live
-              ? canPayout
-                ? "This sends a real PayPal payout from the allowlisted business account and debits your PayPal wallet balance."
-                : "Live payouts are limited to the app owner's business account. Cancel and use Wallet → Pay someone instead."
-              : integration.configured && integration.payoutsEnabled
-                ? "This calls the PayPal sandbox Payouts API. No real money moves."
-                : "Payouts will be simulated and labelled — no real money moves."}
+            <FlaskConical className="mt-0.5 h-3 w-3 shrink-0" />
+            {integration.configured && integration.payoutsEnabled
+              ? "This calls the PayPal sandbox Payouts API. No real money moves."
+              : "Payouts will be simulated and labelled — no real money moves."}
           </p>
           <DialogFooter>
             <Button variant="outline" onClick={() => setRunTarget(null)} disabled={running}>Cancel</Button>
@@ -563,7 +471,9 @@ export default function AutopayPage() {
         <DialogContent>
           <DialogHeader>
             <DialogTitle>Delete schedule for {deleteTarget?.payeeName}?</DialogTitle>
-            <DialogDescription>This removes the schedule and its payout history. Transactions already recorded stay intact.</DialogDescription>
+            <DialogDescription>
+              This removes the schedule and its payout history. A linked expense stays in its Money flows tab as a manual expense; transactions already recorded stay intact.
+            </DialogDescription>
           </DialogHeader>
           <DialogFooter>
             <Button variant="outline" onClick={() => setDeleteTarget(null)}>Keep it</Button>
@@ -571,6 +481,6 @@ export default function AutopayPage() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
-    </div>
+    </>
   );
 }

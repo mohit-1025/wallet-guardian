@@ -4,35 +4,32 @@ import { getSession } from "./storage";
 
 export interface ApiStatus {
   configured: boolean;
-  clientId: string | null;
-  mode: "live" | "sandbox" | "simulated" | "unconfigured";
-  env: "live" | "sandbox";
+  mode: "sandbox" | "simulated";
+  env: "sandbox";
+  source?: "env" | "stored" | "user" | "none";
   authenticated: boolean;
   payoutsEnabled: boolean;
   usdRate: number;
-  loginMode: "sandbox" | "live" | "unconfigured";
-  loginConfigured: boolean;
+  loginMode: "email";
   capabilities: PayPalCapabilities;
 }
 
 export const DEFAULT_STATUS: ApiStatus = {
   configured: false,
-  clientId: null,
-  mode: "unconfigured",
-  env: "live",
+  mode: "simulated",
+  env: "sandbox",
+  source: "none",
   authenticated: false,
   payoutsEnabled: false,
   usdRate: 83.2,
-  loginMode: "unconfigured",
-  loginConfigured: false,
+  loginMode: "email",
   capabilities: {
-    identity: true,
+    identity: false,
     payerPayments: true,
     personalBalance: false,
     personalTransactions: false,
     businessPayouts: false,
     businessInvoices: false,
-    businessReporting: false,
   },
 };
 
@@ -41,10 +38,8 @@ async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
     "Content-Type": "application/json",
     ...((options.headers as Record<string, string> | undefined) ?? {}),
   };
-  // Tells the server which account sent the request: a demo header is pinned to
-  // the sandbox, while a real PayPal session can never fall back to simulation.
-  const account = getSession()?.provider;
-  if (account === "demo" || account === "paypal") headers["x-wg-account"] = account;
+  // Demo requests are pinned to the sandbox server path.
+  if (getSession()?.provider === "demo") headers["x-wg-account"] = "demo";
   const res = await fetch(`/api${path}`, {
     ...options,
     headers,
@@ -64,26 +59,19 @@ export async function getIntegrationStatus(): Promise<ApiStatus> {
   }
 }
 
-export interface PayPalSetupStatus {
-  configured: boolean;
-  source: "env" | "database" | null;
-  env: "live";
-  clientIdHint: string | null;
-  redirectUri: string;
-  canEdit: boolean;
+export interface SandboxConnectResult {
+  connected: boolean;
+  mode: "sandbox" | "simulated";
+  source: "env" | "stored" | "user" | "none";
+  payoutsEnabled: boolean;
 }
 
-export async function getPayPalSetupStatus(): Promise<PayPalSetupStatus> {
-  return api<PayPalSetupStatus>("/setup/paypal");
-}
-
-export async function connectPayPalApp(input: {
-  clientId: string;
-  clientSecret: string;
-}): Promise<{ ok: boolean; configured: boolean; source: "database" }> {
-  return api("/setup/paypal", {
+// Credentials attach once per account, at onboarding, and cannot be changed or
+// removed afterwards (the server enforces this with 409s).
+export async function connectPayPalSandbox(clientId: string, clientSecret: string): Promise<SandboxConnectResult> {
+  return api<SandboxConnectResult>("/paypal/sandbox/connect", {
     method: "POST",
-    body: JSON.stringify(input),
+    body: JSON.stringify({ clientId, clientSecret }),
   });
 }
 
@@ -95,6 +83,7 @@ export interface PayPalOrderResult {
   captureId?: string;
   authorizationId?: string;
   message?: string;
+  error?: string;
 }
 
 export async function createPayPalOrder(input: {
@@ -141,6 +130,7 @@ export async function createPayPalInvoice(input: {
   name: string;
   amountInr: number;
   description: string;
+  dueDate?: string;
   reminder?: Reminder;
 }): Promise<InvoiceResult> {
   return api<InvoiceResult>("/paypal/invoice", {
@@ -150,45 +140,32 @@ export async function createPayPalInvoice(input: {
       name: input.name,
       amountInr: Math.round(input.amountInr),
       description: input.description,
+      dueDate: input.dueDate,
     }),
   });
 }
 
-export interface ReportBalance {
-  currency: string;
-  total: number;
-  available: number;
-  withheld: number;
-}
-
-export interface ReportTransaction {
+// ---- Internal transfers between Wallet Guardian accounts ----
+// When a signed-in payer sends money to an email that belongs to another
+// account, the server queues a credit here. The receiver's client polls,
+// registers the incoming transaction, bumps the wallet balance and consumes.
+export interface IncomingTransfer {
   id: string;
-  date: string;
-  eventCode: string;
-  status: string;
-  amount: number;
-  currency: string;
-  fee: number;
-  subject: string;
-  payerName: string;
-  payerEmail: string;
-  outgoing: boolean;
-}
-
-export interface ReportingOverview {
-  accountId: string | null;
-  asOfTime: string | null;
-  refreshedAt: string | null;
-  balances: ReportBalance[];
-  transactions: ReportTransaction[];
-  totalTransactions: number;
-  range: { start: string; end: string };
-  env: "sandbox" | "live";
+  fromEmail: string;
+  fromName: string;
+  amountInr: number;
   note: string;
+  createdAt: string;
 }
 
-export async function fetchPayPalReporting(): Promise<ReportingOverview> {
-  return api<ReportingOverview>("/paypal/reporting/overview");
+export async function fetchIncomingTransfers(): Promise<IncomingTransfer[]> {
+  const body = await api<{ transfers: IncomingTransfer[] }>("/paypal/transfers");
+  return body.transfers;
+}
+
+export async function consumeIncomingTransfers(ids: string[]): Promise<void> {
+  if (!ids.length) return;
+  await api("/paypal/transfers/consume", { method: "POST", body: JSON.stringify({ ids }) });
 }
 
 export interface PayoutResult {
@@ -196,6 +173,8 @@ export interface PayoutResult {
   status: string;
   simulated: boolean;
   message?: string;
+  /** Present when the receiver's email belongs to another Wallet Guardian account. */
+  internalTransfer?: { toName: string };
 }
 
 export async function sendPayPalPayout(input: {
@@ -203,7 +182,7 @@ export async function sendPayPalPayout(input: {
   name: string;
   amountInr: number;
   note: string;
-  payment: ScheduledPayment;
+  payment?: ScheduledPayment;
 }): Promise<PayoutResult> {
   return api<PayoutResult>("/paypal/payout", {
     method: "POST",

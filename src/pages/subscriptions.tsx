@@ -280,7 +280,11 @@ export default function SubscriptionsPage() {
       <PageHeader
         title="Subscriptions"
         description="Every recurring charge, its next billing date and what the guardian thinks you can stop paying for."
-        actions={<Button size="sm" onClick={openAdd}><Plus /> Add subscription</Button>}
+        actions={
+          <div className="flex items-center gap-2">
+            <Button size="sm" onClick={openAdd}><Plus /> Add subscription</Button>
+          </div>
+        }
       />
 
       <div className="mb-4 grid grid-cols-2 gap-2.5 sm:gap-3 lg:grid-cols-4">

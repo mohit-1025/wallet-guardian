@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import {
-  ArrowDownLeft, ArrowUpRight, BellRing, Check, Copy, ExternalLink, Mail, Pencil, Plus,
+  ArrowDownLeft, ArrowUpRight, BellRing, CalendarClock, Check, Copy, ExternalLink, Mail, Pencil, Plus,
   ReceiptText, Sparkles, Trash2, Undo2,
 } from "lucide-react";
 import { toast } from "sonner";
@@ -29,10 +29,9 @@ const SCOPE_LABEL: Record<Scope, string> = {
 
 export default function RemindersPage() {
   const data = useAppData();
-  const { session, addReminder, updateReminder, deleteReminder, settleReminder, addTransaction } = useApp();
+  const { session, addReminder, updateReminder, deleteReminder, settleReminder, addTransaction, addScheduledPayment } = useApp();
   const { status: integration } = useIntegration();
   const currency = data.profile.currency;
-  const live = session?.env === "live";
   const canInvoice = session?.provider === "demo" || integration.capabilities.businessInvoices;
 
   const [scope, setScope] = useState<Scope>("all");
@@ -183,18 +182,40 @@ export default function RemindersPage() {
         name: requestFor.person,
         amountInr: requestFor.amount,
         description: requestFor.note || "Payment request",
+        dueDate: requestFor.dueDate,
         reminder: requestFor,
       });
       setInvoiceResult(res);
       updateReminder(requestFor.id, { paypalInvoiceId: res.invoiceId, paypalInvoiceUrl: res.invoiceUrl });
-      toast.success(res.simulated ? "Simulated invoice draft created" : live ? "PayPal invoice created" : "PayPal sandbox invoice created", {
-        description: res.simulated ? res.message : `Invoice ${res.invoiceId}`,
+      toast.success(res.simulated ? "Simulated invoice draft created" : "PayPal sandbox invoice scheduled", {
+        description: res.simulated ? res.message : `Invoice ${res.invoiceId} · due ${fmtDate(requestFor.dueDate, "d MMM yyyy")}`,
       });
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Could not create the invoice.");
     } finally {
       setRequesting(false);
     }
+  }
+
+  // "I owe" reminders can be turned into a one-time autopay run on the due
+  // date, so the money leaves the wallet on schedule through the sandbox.
+  function schedulePayment(rem: Reminder) {
+    if (!rem.email) {
+      toast.error("Add their email first", { description: "Edit the reminder and add a PayPal email so the scheduled payment has a payee." });
+      return;
+    }
+    addScheduledPayment({
+      payeeName: rem.person,
+      payeeEmail: rem.email,
+      amount: rem.amount,
+      frequency: "once",
+      startDate: rem.dueDate,
+      category: "Other",
+      note: rem.note || `Scheduled from reminder — ${rem.person}`,
+    });
+    toast.success(`Payment scheduled for ${fmtDate(rem.dueDate, "d MMM yyyy")}`, {
+      description: `₹${rem.amount.toLocaleString("en-IN")} to ${rem.person} runs through your PayPal sandbox. Manage it under Money flows → Autopay.`,
+    });
   }
 
   async function copyRequest() {
@@ -311,6 +332,11 @@ export default function RemindersPage() {
                       </p>
                     </div>
                     <div className="flex flex-wrap items-center gap-1 sm:ml-1">
+                      {rem.direction === "owe" && rem.status === "open" && (
+                        <Button size="sm" variant="outline" onClick={() => schedulePayment(rem)}>
+                          <CalendarClock /> Schedule payment
+                        </Button>
+                      )}
                       {rem.direction === "owed" && rem.status === "open" && (
                         <Button size="sm" variant="outline" onClick={() => openRequest(rem)}>
                           {rem.paypalInvoiceUrl ? <ExternalLink /> : <Mail />}
@@ -334,11 +360,8 @@ export default function RemindersPage() {
       </Card>
 
       <InfoNote className="mt-4" icon={<Sparkles />}>
-        {live
-          ? canInvoice
-            ? "Live invoices are sent from the PayPal business account named in PAYPAL_BUSINESS_EMAILS. Settling a reminder here only updates your local ledger."
-            : "Live invoices are limited to the app owner's PayPal business account. Copy the message and send it from your own PayPal account; settling a reminder only updates your local ledger."
-          : "Demo requests are created in the PayPal sandbox and only work with a sandbox account — no real money moves. Settling here updates your local ledger; it doesn't transfer funds."}{" "}
+        Owed reminders can send a PayPal invoice scheduled on the due date, and owed-by-you reminders can schedule a one-time payment
+        that runs through your sandbox on the due date — no real money moves. Settling here updates your local ledger; it doesn't transfer funds.{" "}
         Suggestions are not financial advice.
       </InfoNote>
 
@@ -431,13 +454,9 @@ export default function RemindersPage() {
             <DialogTitle>Payment request</DialogTitle>
             <DialogDescription>
               Ask {requestFor?.person} for {requestFor ? formatMoney(requestFor.amount, currency) : ""}.
-              {!live && integration.mode === "simulated"
+              {integration.mode === "simulated"
                 ? " PayPal sandbox credentials aren't configured, so requests fall back to a simulated draft."
-                : live
-                  ? canInvoice
-                    ? " Live requests are sent from the allowlisted PayPal business account."
-                    : " Live requests are limited to the app owner's PayPal business account. Copy the message instead."
-                  : " Requests are created in the PayPal sandbox."}
+                : " Requests are created in the PayPal sandbox."}
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-3">
@@ -452,16 +471,14 @@ export default function RemindersPage() {
               <div className="rounded-xl border border-border/70 bg-muted/30 p-3 text-[11.5px]">
                 <div className="flex flex-wrap items-center gap-2">
                   <Badge variant={invoiceResult.simulated ? "secondary" : "success"}>
-                    {invoiceResult.simulated ? "Simulated" : live ? "Live invoice" : "Sandbox invoice"}
+                    {invoiceResult.simulated ? "Simulated" : "Sandbox invoice"}
                   </Badge>
                   <span className="font-medium tabular">{invoiceResult.invoiceId}</span>
                 </div>
                 <p className="mt-1 leading-relaxed text-muted-foreground">
                   {invoiceResult.simulated
                     ? "No PayPal credentials configured. Copy the message above or connect PayPal on the server."
-                    : live
-                      ? "Invoice created in live PayPal. Use the link to review or share it."
-                      : "Invoice drafted in the PayPal sandbox. Use the link to review or share it."}
+                    : "Invoice drafted in the PayPal sandbox. Use the link to review or share it."}
                 </p>
                 {invoiceResult.invoiceUrl && (
                   <a href={invoiceResult.invoiceUrl} target="_blank" rel="noreferrer" className="mt-2 inline-flex items-center gap-1 text-[11.5px] font-semibold text-primary hover:underline">
@@ -472,11 +489,7 @@ export default function RemindersPage() {
             )}
             <div className="flex items-center gap-1.5 rounded-xl border border-border/60 bg-muted/20 px-3 py-2 text-[10.5px] text-muted-foreground">
               <ReceiptText className="h-3 w-3 shrink-0" />
-              {live
-                ? canInvoice
-                  ? "This creates and sends a real invoice from the allowlisted business account. Settle the reminder when payment arrives."
-                  : "Live invoices are unavailable from a personal PayPal login. Copy the message and send it from your own PayPal account; settle the reminder when you receive payment."
-                : "Sandbox only — no real money moves. Settle the reminder when you receive payment."}
+              Sandbox only — no real money moves. Settle the reminder when you receive payment.
             </div>
           </div>
           <DialogFooter>

@@ -1,13 +1,15 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
 import type {
   Account,
-
+  AppNotification,
   Bill,
   Budget,
   BudgetEnvelope,
   FixedObligation,
+  FlowExpense,
   Goal,
   GuardianMessage,
+  NewTransaction,
   PatientCheckout,
   Profile,
   Reminder,
@@ -25,21 +27,22 @@ import {
   loadSampleWorkspace,
   resetDemoData,
   saveUserData,
-  signInWithPayPal,
+  signInWithAccount,
 } from "./storage";
-import { endPayPalSession, fetchPayPalSession } from "./auth";
+import { endAccountSession, fetchAccountSession, loginAccount, registerAccount } from "./auth";
 import { generateBudget } from "./finance";
+import { enrichTransaction, flowsFromObligations, guessFlowTab } from "./flows";
+import { guessCategory } from "./categories";
 import { addDaysISO, addMonthsISO, monthKey, nextMonthKey } from "./dates";
 import { uid } from "./utils";
-
-type NewTransaction = Omit<Transaction, "id" | "createdAt" | "source"> & { source?: Transaction["source"] };
 
 interface OnboardingInput {
   monthlyIncome: number;
   incomeType: "fixed" | "irregular";
   obligations: FixedObligation[];
-  savingsTarget: number;
-  goal?: { name: string; target: number; deadline: string } | null;
+  goals: { name: string; target: number; deadline: string }[];
+  /** Sandbox opening credit for a new account (₹4,16,000 for $5,000 at 83.2). */
+  openingCreditInr?: number;
 }
 
 interface AppContextValue {
@@ -51,6 +54,8 @@ interface AppContextValue {
   clearAuthNotice: () => void;
   signOut: () => Promise<void>;
   signInGuest: () => Promise<void>;
+  signInAccount: (email: string, password: string) => Promise<void>;
+  createAccount: (name: string, email: string, password: string) => Promise<void>;
   resetDemo: () => void;
   loadSample: () => void;
   setProfile: (patch: Partial<Profile>) => void;
@@ -58,7 +63,6 @@ interface AppContextValue {
   addTransaction: (tx: NewTransaction) => Transaction;
   addTransactions: (txs: NewTransaction[]) => void;
   updateTransaction: (id: string, patch: Partial<Transaction>) => void;
-  deleteTransaction: (id: string) => void;
   replaceMonthBudget: (month: string, plan: { budget: Budget; envelopes: BudgetEnvelope[] }) => void;
   ensureBudget: (month: string) => void;
   updateEnvelope: (id: string, allocated: number) => void;
@@ -68,6 +72,8 @@ interface AppContextValue {
   updateGoal: (id: string, patch: Partial<Goal>) => void;
   deleteGoal: (id: string) => void;
   contributeToGoal: (id: string, amount: number, fromWallet?: boolean) => void;
+  /** Pulls money back out of a goal vault into the wallet, with a matching ledger row. */
+  withdrawFromGoal: (id: string, amount: number) => void;
   addSubscription: (sub: Omit<Subscription, "id" | "createdAt" | "priceHistory" | "lastUsedDaysAgo" | "status"> & Partial<Subscription>) => void;
   updateSubscription: (id: string, patch: Partial<Subscription>) => void;
   deleteSubscription: (id: string) => void;
@@ -75,6 +81,10 @@ interface AppContextValue {
   updateBill: (id: string, patch: Partial<Bill>) => void;
   deleteBill: (id: string) => void;
   markBillPaid: (id: string, recordExpense?: boolean) => void;
+  addFlowExpense: (flow: Omit<FlowExpense, "id" | "createdAt" | "status" | "source"> & Partial<FlowExpense>) => FlowExpense;
+  updateFlowExpense: (id: string, patch: Partial<FlowExpense>) => void;
+  deleteFlowExpense: (id: string) => void;
+  initializeFlowExpenses: () => void;
   addReminder: (rem: Omit<Reminder, "id" | "createdAt" | "status"> & Partial<Reminder>) => Reminder;
   updateReminder: (id: string, patch: Partial<Reminder>) => void;
   deleteReminder: (id: string) => void;
@@ -89,10 +99,25 @@ interface AppContextValue {
   addMessage: (m: Omit<GuardianMessage, "id" | "createdAt">) => void;
   clearMessages: () => void;
   topUpWallet: (amountInr: number, orderId: string, captureId?: string) => void;
-  payPerson: (input: { amountInr: number; name: string; email: string; note: string; orderId: string; captureId?: string }) => void;
+  payPerson: (input: { amountInr: number; name: string; email: string; note: string; batchId?: string }) => void;
+  /** Balance tweak used by incoming-transfer processing. */
   adjustWallet: (amountInr: number) => void;
+  pushNotification: (n: Omit<AppNotification, "id" | "createdAt" | "read">) => void;
+  markAllNotificationsRead: () => void;
   refresh: () => void;
 }
+
+export const AUTOPAY_CATEGORY: Record<string, string> = {
+  Housing: "cat_rent",
+  Utilities: "cat_utilities",
+  Subscriptions: "cat_subscriptions",
+  "Food & Dining": "cat_groceries",
+  Education: "cat_education",
+  Health: "cat_health",
+  Loans: "cat_emi",
+  Family: "cat_other",
+  Other: "cat_other",
+};
 
 const AppContext = createContext<AppContextValue | null>(null);
 
@@ -119,7 +144,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       try {
         const stored = getSession();
 
-        // Restore a demo session instantly; a real PayPal session is verified
+        // Restore a demo session instantly; a real account session is verified
         // with the server below and always replaces it when one exists.
         if (stored?.provider === "demo") {
           const demoData = getUserData(stored.userId);
@@ -132,21 +157,21 @@ export function AppProvider({ children }: { children: ReactNode }) {
         }
 
         try {
-          const live = await fetchPayPalSession();
+          const account = await fetchAccountSession();
           if (cancelled) return;
-          if (!live) {
-            if (stored?.provider === "paypal") {
+          if (!account) {
+            if (stored?.provider === "email") {
               clearStoredSession();
-              setAuthNotice("Your PayPal session ended. Sign in again to keep making real payments.");
+              setAuthNotice("Your session ended. Sign in again.");
             }
             return;
           }
-          const res = signInWithPayPal(live.user, stored);
+          const res = signInWithAccount(account.user, stored);
           setSession(res.session);
           setData(res.data);
         } catch {
           // Server unreachable: keep the local ledger; every PayPal call still fails closed.
-          if (!cancelled && stored?.provider === "paypal") {
+          if (!cancelled && stored?.provider === "email") {
             const data = getUserData(stored.userId);
             if (data) {
               setSession(stored);
@@ -180,14 +205,30 @@ export function AppProvider({ children }: { children: ReactNode }) {
     setSession(null);
     setData(null);
     setAuthNotice(null);
-    await endPayPalSession();
+    await endAccountSession();
   }, []);
 
   const signInGuest = useCallback(async () => {
-    // A leftover live cookie would make the server treat demo calls as a real
-    // account. End it first so every demo request stays on the sandbox path.
-    await endPayPalSession();
+    // A leftover account cookie would make the server treat demo calls as a
+    // signed-in account. End it first so every demo request stays on the demo path.
+    await endAccountSession();
     const res = ensureDemoAccount();
+    setSession(res.session);
+    setData(res.data);
+    setAuthNotice(null);
+  }, []);
+
+  const signInAccount = useCallback(async (email: string, password: string) => {
+    const account = await loginAccount(email, password);
+    const res = signInWithAccount(account.user);
+    setSession(res.session);
+    setData(res.data);
+    setAuthNotice(null);
+  }, []);
+
+  const createAccount = useCallback(async (name: string, email: string, password: string) => {
+    const account = await registerAccount(name, email, password);
+    const res = signInWithAccount(account.user);
     setSession(res.session);
     setData(res.data);
     setAuthNotice(null);
@@ -218,33 +259,60 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const completeOnboarding = useCallback(
     (input: OnboardingInput) => {
       update((d) => {
+        const now = new Date().toISOString();
+        const colors = ["#059669", "#0891b2", "#7c3aed", "#d97706", "#db2777", "#4f46e5"];
+        const pendingGoals: Goal[] = input.goals
+          .filter((g) => g.name.trim() && g.target > 0)
+          .map((g, i) => ({
+            id: uid("goal"),
+            name: g.name.trim(),
+            target: g.target,
+            saved: 0,
+            deadline: g.deadline,
+            icon: "target",
+            color: colors[i % colors.length],
+            createdAt: now,
+          }));
         const profile: Profile = {
           ...d.profile,
           monthlyIncome: input.monthlyIncome,
           incomeType: input.incomeType,
           fixedObligations: input.obligations,
-          savingsTarget: input.savingsTarget,
+          savingsTarget: 0,
           onboardingComplete: true,
         };
-        const plan = generateBudget(profile, d.transactions, d.categories);
-        const goals = [...d.goals];
-        if (input.goal && input.goal.name.trim() && input.goal.target > 0) {
-          goals.push({
-            id: uid("goal"),
-            name: input.goal.name.trim(),
-            target: input.goal.target,
-            saved: 0,
-            deadline: input.goal.deadline,
-            icon: "target",
-            color: "#059669",
-            autoMonthly: Math.max(0, Math.round(input.savingsTarget)),
-            createdAt: new Date().toISOString(),
-          });
-        }
+        const plan = generateBudget(profile, d.transactions, d.categories, monthKey(), pendingGoals);
+        const goals = pendingGoals.map((g, i) => ({
+          ...g,
+          autoMonthly: Math.max(0, Math.round(plan.adaptive.goalRequests[i]?.monthly ?? 0)),
+        }));
+        const onboardingFlows = flowsFromObligations(input.obligations, d.flowExpenses, now);
+        const credit = Math.max(0, Math.round(input.openingCreditInr ?? 0));
+        const openingRow: NewTransaction | null = credit
+          ? {
+              type: "income",
+              amount: credit,
+              categoryId: "cat_refunds",
+              merchant: "Opening balance — sandbox credit",
+              date: new Date().toISOString().slice(0, 10),
+              paymentMethod: "PayPal",
+              notes: "Sandbox opening credit of $5,000 — excluded from income analytics",
+              source: "paypal",
+              transfer: true,
+              channel: "paypal",
+            }
+          : null;
         return {
           ...d,
-          profile,
-          goals,
+          profile: { ...profile, savingsTarget: plan.savingsAllocated, walletBalance: d.profile.walletBalance + credit },
+          accounts: openingRow ? updateAccountBalance(d.accounts, "paypal", credit) : d.accounts,
+          transactions: openingRow ? [enrichTransaction({ ...openingRow, id: uid("tx"), createdAt: now, source: openingRow.source ?? "manual" }), ...d.transactions] : d.transactions,
+          notifications: credit
+            ? [{ id: uid("ntf"), kind: "credit", title: "Sandbox credit received", body: "Your account was credited with the $5,000 opening balance.", createdAt: now }, ...d.notifications]
+            : d.notifications,
+          goals: [...d.goals, ...goals],
+          flowExpenses: [...d.flowExpenses, ...onboardingFlows],
+          flowsInitialized: true,
           budgets: [...d.budgets.filter((b) => b.month !== plan.budget.month), plan.budget],
           envelopes: [...d.envelopes.filter((e) => e.budgetId !== plan.budget.id), ...plan.envelopes],
         };
@@ -255,12 +323,12 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
   const addTransaction = useCallback(
     (tx: NewTransaction) => {
-      const full: Transaction = {
+      const full: Transaction = enrichTransaction({
         ...tx,
         id: uid("tx"),
         source: tx.source ?? "manual",
         createdAt: new Date().toISOString(),
-      };
+      });
       update((d) => ({ ...d, transactions: [full, ...d.transactions] }));
       return full;
     },
@@ -270,7 +338,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const addTransactions = useCallback(
     (txs: NewTransaction[]) => {
       const stamp = new Date().toISOString();
-      const full = txs.map((tx) => ({ ...tx, id: uid("tx"), source: tx.source ?? "import" as const, createdAt: stamp }));
+      const full = txs.map((tx) => enrichTransaction({ ...tx, id: uid("tx"), source: tx.source ?? "import" as const, createdAt: stamp }));
       update((d) => ({ ...d, transactions: [...full, ...d.transactions] }));
     },
     [update],
@@ -279,11 +347,6 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const updateTransaction = useCallback(
     (id: string, patch: Partial<Transaction>) =>
       update((d) => ({ ...d, transactions: d.transactions.map((t) => (t.id === id ? { ...t, ...patch } : t)) })),
-    [update],
-  );
-
-  const deleteTransaction = useCallback(
-    (id: string) => update((d) => ({ ...d, transactions: d.transactions.filter((t) => t.id !== id) })),
     [update],
   );
 
@@ -301,7 +364,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     (month: string) => {
       setData((prev) => {
         if (!prev || prev.budgets.some((b) => b.month === month)) return prev;
-        const plan = generateBudget(prev.profile, prev.transactions, prev.categories, month);
+        const plan = generateBudget(prev.profile, prev.transactions, prev.categories, month, prev.goals);
         const next = {
           ...prev,
           budgets: [...prev.budgets, plan.budget],
@@ -378,20 +441,111 @@ export function AppProvider({ children }: { children: ReactNode }) {
     [update],
   );
 
+  // Deleting a goal refunds everything saved back to the wallet, with a
+  // matching ledger row so balance and transactions stay in sync.
   const deleteGoal = useCallback(
-    (id: string) => update((d) => ({ ...d, goals: d.goals.filter((g) => g.id !== id) })),
+    (id: string) =>
+      update((d) => {
+        const goal = d.goals.find((g) => g.id === id);
+        if (!goal) return d;
+        const refund = Math.max(0, Math.round(goal.saved));
+        const now = new Date().toISOString();
+        const refundRow = refund
+          ? {
+              id: uid("tx"),
+              type: "income" as const,
+              amount: refund,
+              categoryId: "cat_refunds",
+              merchant: `Goal refund — ${goal.name}`,
+              date: now.slice(0, 10),
+              paymentMethod: "PayPal",
+              notes: "Savings goal deleted — saved amount returned to wallet",
+              source: "paypal" as const,
+              transfer: true,
+              channel: "paypal" as const,
+              createdAt: now,
+            }
+          : null;
+        return {
+          ...d,
+          goals: d.goals.filter((g) => g.id !== id),
+          transactions: refundRow ? [refundRow, ...d.transactions] : d.transactions,
+          profile: { ...d.profile, walletBalance: d.profile.walletBalance + refund },
+          accounts: refund ? updateAccountBalance(d.accounts, "paypal", refund) : d.accounts,
+        };
+      }),
     [update],
   );
 
+  // Adding to savings deducts the wallet and records a transfer row, so the
+  // ledger always explains the balance.
   const contributeToGoal = useCallback(
     (id: string, amount: number, fromWallet = true) => {
       const amt = Math.max(0, Math.round(amount));
-      update((d) => ({
-        ...d,
-        goals: d.goals.map((g) => (g.id === id ? { ...g, saved: Math.min(g.target, g.saved + amt) } : g)),
-        profile: fromWallet ? { ...d.profile, walletBalance: d.profile.walletBalance - amt } : d.profile,
-        accounts: fromWallet ? updateAccountBalance(d.accounts, "paypal", -amt) : d.accounts,
-      }));
+      update((d) => {
+        const goal = d.goals.find((g) => g.id === id);
+        if (!goal || amt <= 0) return d;
+        const now = new Date().toISOString();
+        const row = fromWallet
+          ? {
+              id: uid("tx"),
+              type: "expense" as const,
+              amount: amt,
+              categoryId: "cat_refunds",
+              merchant: `Savings — ${goal.name}`,
+              date: now.slice(0, 10),
+              paymentMethod: "PayPal",
+              notes: "Moved to savings goal — excluded from expense analytics",
+              source: "paypal" as const,
+              transfer: true,
+              channel: "paypal" as const,
+              createdAt: now,
+            }
+          : null;
+        return {
+          ...d,
+          goals: d.goals.map((g) => (g.id === id ? { ...g, saved: Math.min(g.target, g.saved + amt) } : g)),
+          transactions: row ? [row, ...d.transactions] : d.transactions,
+          profile: fromWallet ? { ...d.profile, walletBalance: Math.max(0, d.profile.walletBalance - amt) } : d.profile,
+          accounts: fromWallet ? updateAccountBalance(d.accounts, "paypal", -amt) : d.accounts,
+        };
+      });
+    },
+    [update],
+  );
+
+  // Mirror of contributeToGoal for pulling money back out of a vault.
+  const withdrawFromGoal = useCallback(
+    (id: string, amount: number) => {
+      const amt = Math.max(0, Math.round(amount));
+      update((d) => {
+        const goal = d.goals.find((g) => g.id === id);
+        if (!goal || amt <= 0) return d;
+        const now = new Date().toISOString();
+        return {
+          ...d,
+          goals: d.goals.map((g) => (g.id === id ? { ...g, saved: Math.max(0, g.saved - amt) } : g)),
+          transactions: [
+            {
+              id: uid("tx"),
+              type: "income" as const,
+              amount: amt,
+              categoryId: "cat_refunds",
+              merchant: `Savings withdrawal — ${goal.name}`,
+              date: now.slice(0, 10),
+              paymentMethod: "PayPal",
+              notes: "Moved back from savings goal — excluded from income analytics",
+              source: "paypal" as const,
+              transfer: true,
+              channel: "paypal" as const,
+              createdAt: now,
+            },
+            ...d.transactions,
+          ],
+          profile: { ...d.profile, walletBalance: d.profile.walletBalance + amt },
+          accounts: updateAccountBalance(d.accounts, "paypal", amt),
+        };
+      });
     },
     [update],
   );
@@ -466,6 +620,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
               paymentMethod: "Bill payment",
               source: "manual",
               notes: "Marked paid from Bills",
+              flowTab: bill.kind === "emi" ? "emis" : bill.kind === "ticket" ? "others" : "bills",
+              flowTabSource: "auto",
+              channel: "wallet_guardian",
               createdAt: new Date().toISOString(),
             },
             ...next.transactions,
@@ -476,6 +633,47 @@ export function AppProvider({ children }: { children: ReactNode }) {
     },
     [update],
   );
+
+  const addFlowExpense = useCallback(
+    (flow: Omit<FlowExpense, "id" | "createdAt" | "status" | "source"> & Partial<FlowExpense>) => {
+      const full: FlowExpense = {
+        ...flow,
+        id: uid("flow"),
+        status: flow.status ?? "active",
+        source: flow.source ?? "manual",
+        createdAt: new Date().toISOString(),
+      };
+      update((d) => ({ ...d, flowExpenses: [...d.flowExpenses, full] }));
+      return full;
+    },
+    [update],
+  );
+
+  const updateFlowExpense = useCallback(
+    (id: string, patch: Partial<FlowExpense>) =>
+      update((d) => ({ ...d, flowExpenses: d.flowExpenses.map((f) => (f.id === id ? { ...f, ...patch } : f)) })),
+    [update],
+  );
+
+  const deleteFlowExpense = useCallback(
+    (id: string) => update((d) => ({ ...d, flowExpenses: d.flowExpenses.filter((f) => f.id !== id) })),
+    [update],
+  );
+
+  const initializeFlowExpenses = useCallback(() => {
+    setData((prev) => {
+      if (!prev) return prev;
+      const fromObligations = flowsFromObligations(prev.profile.fixedObligations, prev.flowExpenses);
+      if (fromObligations.length === 0 && prev.flowsInitialized) return prev;
+      const next = {
+        ...prev,
+        flowExpenses: [...fromObligations, ...prev.flowExpenses],
+        flowsInitialized: true,
+      };
+      saveUserData(next);
+      return next;
+    });
+  }, []);
 
   const addReminder = useCallback(
     (rem: Omit<Reminder, "id" | "createdAt" | "status"> & Partial<Reminder>) => {
@@ -529,6 +727,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
     [update],
   );
 
+  // Every run that moved (or would move) money registers its row and debits
+  // the wallet immediately, whatever PayPal answered. Only failed runs leave
+  // the ledger untouched.
   const recordScheduledRun = useCallback(
     (id: string, run: { status: "paid" | "simulated" | "failed"; paypalBatchId?: string; note?: string }) => {
       update((d) => {
@@ -545,6 +746,26 @@ export function AppProvider({ children }: { children: ReactNode }) {
         let nextStatus = payment.status;
         if (payment.frequency === "once") nextStatus = "completed";
         else if (ended) nextStatus = "completed";
+        const categoryId = AUTOPAY_CATEGORY[payment.category] ?? "cat_other";
+        const linkedFlow = d.flowExpenses.find((f) => f.autopayId === payment.id);
+        const guessed = guessFlowTab(payment.payeeName, categoryId, "expense");
+        const moved = run.status !== "failed";
+        const row = {
+          id: uid("tx"),
+          type: "expense" as const,
+          amount: payment.amount,
+          categoryId,
+          merchant: payment.payeeName,
+          date: today,
+          paymentMethod: "PayPal",
+          notes: `Autopay to ${payment.payeeEmail}${run.note ? ` — ${run.note}` : ""}`,
+          source: "autopay" as const,
+          paypalOrderId: run.paypalBatchId,
+          flowTab: linkedFlow?.tab ?? guessed?.tab,
+          flowTabSource: linkedFlow ? ("auto" as const) : guessed?.source,
+          channel: "autopay" as const,
+          createdAt: new Date().toISOString(),
+        };
         return {
           ...d,
           scheduledPayments: d.scheduledPayments.map((p) =>
@@ -560,28 +781,21 @@ export function AppProvider({ children }: { children: ReactNode }) {
                 }
               : p,
           ),
-          transactions:
-            run.status === "failed"
-              ? d.transactions
-              : [
-                  {
-                    id: uid("tx"),
-                    type: "expense",
-                    amount: payment.amount,
-                    categoryId: payment.category === "Housing" ? "cat_rent" : payment.category === "Education" ? "cat_education" : "cat_other",
-                    merchant: payment.payeeName,
-                    date: today,
-                    paymentMethod: "PayPal",
-                    notes: `Autopay to ${payment.payeeEmail}${run.status === "simulated" ? " (simulated)" : ""}`,
-                    source: "autopay",
-                    paypalOrderId: run.paypalBatchId,
-                    createdAt: new Date().toISOString(),
-                  },
-                  ...d.transactions,
-                ],
-          profile: run.status === "failed" ? d.profile : { ...d.profile, walletBalance: d.profile.walletBalance - payment.amount },
-          accounts:
-            run.status === "failed" ? d.accounts : updateAccountBalance(d.accounts, "paypal", -payment.amount),
+          transactions: moved ? [row, ...d.transactions] : d.transactions,
+          profile: moved ? { ...d.profile, walletBalance: Math.max(0, d.profile.walletBalance - payment.amount) } : d.profile,
+          accounts: moved ? updateAccountBalance(d.accounts, "paypal", -payment.amount) : d.accounts,
+          notifications: moved
+            ? [
+                {
+                  id: uid("ntf"),
+                  kind: "payment_sent" as const,
+                  title: "Autopay sent",
+                  body: `₹${payment.amount.toLocaleString("en-IN")} sent to ${payment.payeeName}${run.status === "simulated" ? " (sandbox simulation)" : ""}.`,
+                  createdAt: new Date().toISOString(),
+                },
+                ...d.notifications,
+              ]
+            : d.notifications,
         };
       });
     },
@@ -618,12 +832,12 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
   const clearMessages = useCallback(() => update((d) => ({ ...d, messages: [] })), [update]);
 
+  // A top-up registers its row and credits the wallet immediately, whatever
+  // the sandbox answered.
   const topUpWallet = useCallback(
     (amountInr: number, orderId: string, captureId?: string) => {
       update((d) => ({
         ...d,
-        profile: { ...d.profile, walletBalance: d.profile.walletBalance + amountInr },
-        accounts: updateAccountBalance(d.accounts, "paypal", amountInr),
         transactions: [
           {
             id: uid("tx"),
@@ -638,39 +852,52 @@ export function AppProvider({ children }: { children: ReactNode }) {
             paypalOrderId: orderId,
             paypalCaptureId: captureId,
             transfer: true,
+            channel: "paypal",
             createdAt: new Date().toISOString(),
           },
           ...d.transactions,
         ],
+        profile: { ...d.profile, walletBalance: d.profile.walletBalance + amountInr },
+        accounts: updateAccountBalance(d.accounts, "paypal", amountInr),
       }));
     },
     [update],
   );
 
+  // Paying someone registers the expense and debits the wallet no matter what
+  // the sandbox answered. When the receiver's email belongs to another account
+  // the server queues an internal transfer for their client to collect.
   const payPerson = useCallback(
-    (input: { amountInr: number; name: string; email: string; note: string; orderId: string; captureId?: string }) => {
-      update((d) => ({
-        ...d,
-        profile: { ...d.profile, walletBalance: d.profile.walletBalance - input.amountInr },
-        accounts: updateAccountBalance(d.accounts, "paypal", -input.amountInr),
-        transactions: [
-          {
-            id: uid("tx"),
-            type: "expense",
-            amount: input.amountInr,
-            categoryId: "cat_other",
-            merchant: input.name || input.email,
-            date: new Date().toISOString().slice(0, 10),
-            paymentMethod: "PayPal",
-            notes: input.note || `PayPal payment to ${input.email}`,
-            source: "paypal",
-            paypalOrderId: input.orderId,
-            paypalCaptureId: input.captureId,
-            createdAt: new Date().toISOString(),
-          },
-          ...d.transactions,
-        ],
-      }));
+    (input: { amountInr: number; name: string; email: string; note: string; batchId?: string }) => {
+      update((d) => {
+        const merchant = input.name || input.email;
+        const categoryId = guessCategory(merchant, "expense").categoryId;
+        const flow = guessFlowTab(merchant, categoryId, "expense");
+        return {
+          ...d,
+          transactions: [
+            {
+              id: uid("tx"),
+              type: "expense",
+              amount: input.amountInr,
+              categoryId,
+              merchant,
+              date: new Date().toISOString().slice(0, 10),
+              paymentMethod: "PayPal",
+              notes: input.note || `PayPal payment to ${input.email}`,
+              source: "paypal",
+              paypalOrderId: input.batchId,
+              flowTab: flow?.tab,
+              flowTabSource: flow?.source,
+              channel: "paypal",
+              createdAt: new Date().toISOString(),
+            },
+            ...d.transactions,
+          ],
+          profile: { ...d.profile, walletBalance: Math.max(0, d.profile.walletBalance - input.amountInr) },
+          accounts: updateAccountBalance(d.accounts, "paypal", -input.amountInr),
+        };
+      });
     },
     [update],
   );
@@ -685,6 +912,20 @@ export function AppProvider({ children }: { children: ReactNode }) {
     [update],
   );
 
+  const pushNotification = useCallback(
+    (n: Omit<AppNotification, "id" | "createdAt" | "read">) =>
+      update((d) => ({
+        ...d,
+        notifications: [{ ...n, id: uid("ntf"), createdAt: new Date().toISOString(), read: false }, ...d.notifications].slice(0, 50),
+      })),
+    [update],
+  );
+
+  const markAllNotificationsRead = useCallback(
+    () => update((d) => ({ ...d, notifications: d.notifications.map((n) => ({ ...n, read: true })) })),
+    [update],
+  );
+
   const refresh = useCallback(() => {
     if (!session) return;
     const stored = getUserData(session.userId);
@@ -694,26 +935,29 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const value = useMemo<AppContextValue>(
     () => ({
       session, data, loading, bootError, authNotice, clearAuthNotice,
-      signOut, signInGuest, resetDemo, loadSample,
+      signOut, signInGuest, signInAccount, createAccount, resetDemo, loadSample,
       setProfile, completeOnboarding,
-      addTransaction, addTransactions, updateTransaction, deleteTransaction,
+      addTransaction, addTransactions, updateTransaction,
       replaceMonthBudget, ensureBudget, updateEnvelope, moveEnvelopeMoney, rolloverMonth,
-      addGoal, updateGoal, deleteGoal, contributeToGoal,
+      addGoal, updateGoal, deleteGoal, contributeToGoal, withdrawFromGoal,
       addSubscription, updateSubscription, deleteSubscription,
       addBill, updateBill, deleteBill, markBillPaid,
+      addFlowExpense, updateFlowExpense, deleteFlowExpense, initializeFlowExpenses,
       addReminder, updateReminder, deleteReminder, settleReminder,
       addScheduledPayment, updateScheduledPayment, deleteScheduledPayment, recordScheduledRun,
       dismissInsight, addCheckout, updateCheckout, addMessage, clearMessages,
-      topUpWallet, payPerson, adjustWallet, refresh,
+      topUpWallet, payPerson, adjustWallet, pushNotification, markAllNotificationsRead, refresh,
     }),
     [
-      session, data, loading, bootError, authNotice, clearAuthNotice, signOut, signInGuest, resetDemo, loadSample, setProfile, completeOnboarding,
-      addTransaction, addTransactions, updateTransaction, deleteTransaction, replaceMonthBudget, ensureBudget,
-      updateEnvelope, moveEnvelopeMoney, rolloverMonth, addGoal, updateGoal, deleteGoal, contributeToGoal,
+      session, data, loading, bootError, authNotice, clearAuthNotice, signOut, signInGuest, signInAccount, createAccount,
+      resetDemo, loadSample, setProfile, completeOnboarding,
+      addTransaction, addTransactions, updateTransaction, replaceMonthBudget, ensureBudget,
+      updateEnvelope, moveEnvelopeMoney, rolloverMonth, addGoal, updateGoal, deleteGoal, contributeToGoal, withdrawFromGoal,
       addSubscription, updateSubscription, deleteSubscription, addBill, updateBill, deleteBill, markBillPaid,
+      addFlowExpense, updateFlowExpense, deleteFlowExpense, initializeFlowExpenses,
       addReminder, updateReminder, deleteReminder, settleReminder, addScheduledPayment, updateScheduledPayment,
       deleteScheduledPayment, recordScheduledRun, dismissInsight, addCheckout, updateCheckout, addMessage,
-      clearMessages, topUpWallet, payPerson, adjustWallet, refresh,
+      clearMessages, topUpWallet, payPerson, adjustWallet, pushNotification, markAllNotificationsRead, refresh,
     ],
   );
 

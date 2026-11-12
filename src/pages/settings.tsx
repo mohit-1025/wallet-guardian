@@ -12,7 +12,6 @@ import { Input, Label, Select, SelectContent, SelectItem, SelectTrigger, SelectV
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { MoneyInput } from "@/components/ui/money";
 import { useApp, useAppData } from "@/lib/app-context";
-import { fetchPayPalAccount, type PayPalAccount } from "@/lib/auth";
 import { useIntegration } from "@/lib/integration-context";
 import { useTheme } from "@/lib/theme";
 import { todayISO } from "@/lib/dates";
@@ -32,28 +31,12 @@ export default function SettingsPage() {
   const { status: integration, loading: integrationLoading, refresh } = useIntegration();
   const { theme, setTheme } = useTheme();
   const currency = data.profile.currency;
-  const live = session?.env === "live";
 
   const [name, setName] = useState(data.profile.name);
   const [income, setIncome] = useState(() => formatAmountInput(data.profile.monthlyIncome, currency));
   const [savingsTarget, setSavingsTarget] = useState(() => formatAmountInput(data.profile.savingsTarget, currency));
   const [incomeType, setIncomeType] = useState<Profile["incomeType"]>(data.profile.incomeType);
   const [confirm, setConfirm] = useState<"reset" | "sample" | null>(null);
-  const [paypalAccount, setPaypalAccount] = useState<PayPalAccount | null>(null);
-
-  useEffect(() => {
-    if (session?.provider !== "paypal") {
-      setPaypalAccount(null);
-      return;
-    }
-    let cancelled = false;
-    fetchPayPalAccount().then((account) => {
-      if (!cancelled) setPaypalAccount(account);
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [session?.provider, session?.userId]);
 
   useEffect(() => {
     setName(data.profile.name);
@@ -118,7 +101,7 @@ export default function SettingsPage() {
     <div className="space-y-4">
       <PageHeader
         title="Settings"
-        description="Your profile, how money is displayed, and the PayPal environment behind Wallet Guardian."
+        description="Your profile, how money is displayed, and the PayPal sandbox behind Wallet Guardian."
         eyebrow={<Badge variant="outline"><ShieldCheck /> Local-first workspace</Badge>}
       />
 
@@ -140,7 +123,7 @@ export default function SettingsPage() {
                 <Label htmlFor="settings-email">Email</Label>
                 <Input id="settings-email" value={data.profile.email} readOnly className="bg-muted/40 text-muted-foreground" />
                 <p className="text-[10.5px] text-muted-foreground">
-                  {session?.provider === "demo" ? "Demo account — sign in with PayPal for a private workspace." : "Email shared by PayPal at sign-in."}
+                  {session?.provider === "demo" ? "Demo account — create an email account for a private workspace." : "Email you signed up with."}
                 </p>
               </div>
             </div>
@@ -229,7 +212,7 @@ export default function SettingsPage() {
 
           <Card>
             <CardHeader className="flex-row items-center justify-between">
-              <CardTitle className="flex items-center gap-2"><CreditCard className="h-4 w-4 text-primary" />{live ? "PayPal live" : "PayPal sandbox"}</CardTitle>
+              <CardTitle className="flex items-center gap-2"><CreditCard className="h-4 w-4 text-primary" />PayPal sandbox</CardTitle>
               <Button size="icon-sm" variant="ghost" onClick={refresh} disabled={integrationLoading} aria-label="Refresh integration status">
                 {integrationLoading ? <Spinner /> : <RefreshCw className="h-3.5 w-3.5" />}
               </Button>
@@ -237,8 +220,8 @@ export default function SettingsPage() {
             <CardContent className="space-y-2.5 text-[12px]">
               <div className="flex items-center justify-between gap-3">
                 <span className="text-muted-foreground">Status</span>
-                <Badge variant={live || integration.configured ? "success" : "warning"}>
-                  <CheckCircle2 />{live ? "Live account" : integration.configured ? "Configured" : "Simulation fallback"}
+                <Badge variant={integration.configured ? "success" : "warning"}>
+                  <CheckCircle2 />{integration.configured ? "Configured" : "Simulation fallback"}
                 </Badge>
               </div>
               <div className="flex items-center justify-between gap-3">
@@ -247,20 +230,14 @@ export default function SettingsPage() {
               </div>
               <div className="flex items-center justify-between gap-3">
                 <span className="text-muted-foreground">Environment</span>
-                <span className="font-mono text-[10.5px]">{live ? "api-m.paypal.com" : "api-m.sandbox.paypal.com"}</span>
-              </div>
-              <div className="flex items-center justify-between gap-3">
-                <span className="text-muted-foreground">Client ID</span>
-                <span className="font-mono text-[10.5px]">
-                  {integration.clientId ? `${integration.clientId.slice(0, 6)}…${integration.clientId.slice(-4)}` : "Not set"}
-                </span>
+                <span className="font-mono text-[10.5px]">api-m.sandbox.paypal.com</span>
               </div>
               <div className="flex items-center justify-between gap-3">
                 <span className="text-muted-foreground">Payouts</span>
-                <span className="font-medium">{integration.payoutsEnabled ? "Enabled" : live ? "Not enabled" : "Simulated"}</span>
+                <span className="font-medium">{integration.payoutsEnabled ? "Enabled" : "Simulated"}</span>
               </div>
               <InfoNote icon={<ShieldCheck />} className="mt-1">
-                Credentials and session tokens live only in the server-side API process. The browser never receives your PayPal secret.
+                Credentials and session tokens live only in the server-side API process. The browser never receives your PayPal secret, and no request ever reaches the live PayPal API.
               </InfoNote>
               <Button variant="outline" size="sm" asChild className="w-full justify-center">
                 <Link to="/app/wallet">Open Wallet & PayPal</Link>
@@ -275,7 +252,7 @@ export default function SettingsPage() {
           <CardHeader>
             <CardTitle className="flex items-center gap-2"><Database className="h-4 w-4 text-primary" />Data & privacy</CardTitle>
             <p className="text-[11.5px] text-muted-foreground">
-              This build stores your workspace in this browser's local storage. Nothing is sent to a third party except the PayPal calls you trigger ({live ? "live PayPal" : "sandbox only"}).
+              This build stores your workspace in this browser's local storage. Nothing is sent to a third party except the PayPal sandbox calls you trigger.
             </p>
           </CardHeader>
           <CardContent className="space-y-3">
@@ -309,40 +286,35 @@ export default function SettingsPage() {
                   <p className="text-[12.5px] font-semibold">{data.profile.name}</p>
                   <p className="truncate text-[11px] text-muted-foreground">{data.profile.email}</p>
                 </div>
-                {session?.provider !== "demo" && (paypalAccount?.user.verified || session?.verified) && (
-                  <Badge variant="success"><CheckCircle2 />PayPal verified</Badge>
+                {session?.provider !== "demo" && (
+                  <Badge variant="success"><CheckCircle2 />Email account</Badge>
                 )}
               </div>
               <p className="mt-1 text-[10.5px] text-muted-foreground">
                 {session?.provider === "demo"
                   ? "Guest demo session · sandbox only"
-                  : `PayPal account · ${live ? "live money" : "sandbox"}`}{" "}
+                  : "Email account · sandbox payments"}{" "}
                 · joined {new Date(data.profile.createdAt).toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" })}
               </p>
-              {session?.provider !== "demo" && session?.payerId && (
-                <p className="mt-1.5 truncate font-mono text-[10px] text-muted-foreground" title={session.payerId}>
-                  Payer ID {session.payerId}
-                </p>
-              )}
             </div>
             {session?.provider !== "demo" && (
               <div className="space-y-1.5 rounded-xl border border-border/70 px-3 py-2.5 text-[11px]">
                 <div className="flex items-center justify-between gap-3">
-                  <span className="text-muted-foreground">Payments</span>
-                  <span className="font-medium">Approved by you in PayPal</span>
+                  <span className="text-muted-foreground">Sign-in</span>
+                  <span className="font-medium">Email and password</span>
                 </div>
                 <div className="flex items-center justify-between gap-3">
-                  <span className="text-muted-foreground">Balance & history</span>
-                  <span className="text-right font-medium">Local ledger</span>
+                  <span className="text-muted-foreground">Payments</span>
+                  <span className="text-right font-medium">Sandbox only</span>
                 </div>
                 <p className="text-[10px] leading-relaxed text-muted-foreground">
-                  PayPal shares your identity, not your personal balance or transaction history. This workspace records what you do here.
+                  Your password is salted and hashed on the server. PayPal sandbox handles every payment, so no real money moves.
                 </p>
               </div>
             )}
             <Button variant="destructive" size="sm" onClick={signOut}><LogOut /> Sign out</Button>
             <InfoNote icon={<AlertTriangle />}>
-              Signing out ends the PayPal session on this server and keeps this workspace in the browser. Use Export first if you want a copy.
+              Signing out ends the session on this server and keeps this workspace in the browser. Use Export first if you want a copy.
             </InfoNote>
           </CardContent>
         </Card>
