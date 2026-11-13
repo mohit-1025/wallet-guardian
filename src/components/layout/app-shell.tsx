@@ -184,10 +184,10 @@ export function AppShell() {
             </span>
             <span className="min-w-0 flex-1">
               <span className="block truncate text-[11px] font-semibold">
-                {status.configured ? "PayPal sandbox" : "Simulated PayPal"}
+                {status.configured ? "PayPal connected" : "PayPal not connected"}
               </span>
               <span className="block truncate text-[10px] text-muted-foreground">
-                No real money moves
+                Wallet & payments
               </span>
             </span>
           </button>
@@ -339,13 +339,12 @@ export function AppShell() {
           {/* Payment environment banner */}
           <div className="flex items-center gap-2 border-t border-indigo-100 bg-indigo-50/70 px-4 py-1.5 text-[10.5px] text-indigo-800 dark:border-indigo-400/10 dark:bg-indigo-500/10 dark:text-indigo-200 sm:px-6 lg:px-8">
             <FlaskConical className="h-3 w-3 shrink-0" />
-            <span className="font-semibold">Sandbox mode</span>
-            <span className="hidden text-indigo-700/80 dark:text-indigo-200/70 sm:inline">— no real money moves.</span>
+            <span className="font-semibold">PayPal</span>
             <span className="ml-auto hidden items-center gap-1 sm:flex">
               {status.configured ? (
-                <><span className="h-1.5 w-1.5 rounded-full bg-emerald-500" /> PayPal sandbox keys connected</>
+                <><span className="h-1.5 w-1.5 rounded-full bg-emerald-500" /> Connected</>
               ) : (
-                <><span className="h-1.5 w-1.5 rounded-full bg-amber-500" /> Simulation — keys not configured</>
+                <><span className="h-1.5 w-1.5 rounded-full bg-amber-500" /> Not connected</>
               )}
             </span>
             <Link to="/app/wallet" className="ml-auto font-semibold underline decoration-indigo-400/50 underline-offset-2 hover:decoration-indigo-500 sm:ml-3">

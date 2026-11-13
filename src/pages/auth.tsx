@@ -1,6 +1,6 @@
 import { useState, type FormEvent } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import { ArrowLeft, FlaskConical, Loader2, Lock, Mail, Moon, ShieldCheck, Sparkles, Sun, User } from "lucide-react";
+import { ArrowLeft, Loader2, Lock, Mail, Moon, ShieldCheck, Sparkles, Sun, User } from "lucide-react";
 import { toast } from "sonner";
 import { useApp } from "@/lib/app-context";
 import { Logo } from "@/components/brand";
@@ -52,10 +52,10 @@ export default function AuthPage() {
     try {
       if (registering) {
         await createAccount(name.trim(), email.trim(), password);
-        toast.success("Account created", { description: "Sandbox only — no real money moves." });
+        toast.success("Account created");
       } else {
         await signInAccount(email.trim(), password);
-        toast.success("Welcome back", { description: "Sandbox only — no real money moves." });
+        toast.success("Welcome back");
       }
       navigate("/app");
     } catch (err) {
@@ -124,8 +124,8 @@ export default function AuthPage() {
           </div>
         </div>
         <div className="relative flex items-center gap-2 text-[11px] text-indigo-200/60">
-          <FlaskConical className="h-3.5 w-3.5" />
-          Sandbox only — no real money moves. Your budget ledger stays in this browser.
+          <ShieldCheck className="h-3.5 w-3.5" />
+          Your budget ledger stays in this browser.
         </div>
       </div>
 
@@ -151,14 +151,8 @@ export default function AuthPage() {
           <p className="mt-1.5 text-[13px] leading-relaxed text-muted-foreground">
             {registering
               ? "Use your email and a password you'll remember. The password is hashed on the server and never stored in plain text."
-              : "Use the email and password you signed up with. Payments run in the PayPal sandbox, so no real money moves."}
+              : "Use the email and password you signed up with."}
           </p>
-
-          <div className="mt-4 flex flex-wrap items-center gap-2">
-            <span className="inline-flex items-center gap-1.5 rounded-full border border-border bg-muted px-2.5 py-1 text-[10.5px] font-semibold text-muted-foreground">
-              <FlaskConical className="h-3 w-3" /> Sandbox only — no real money moves
-            </span>
-          </div>
 
           <div className="mt-5 grid grid-cols-2 gap-1 rounded-xl border border-border bg-muted/60 p-1">
             <button
@@ -263,7 +257,7 @@ export default function AuthPage() {
             {busy === "demo" ? "Loading demo…" : "Explore the demo instead"}
           </Button>
           <p className="mt-2 text-center text-[11px] leading-relaxed text-muted-foreground">
-            Signs you in as Aarav with three months of sample data. The demo stays in the PayPal sandbox and is clearly labelled — it never moves real money.
+            Signs you in as Aarav with three months of sample data. Everything stays local to this browser.
           </p>
 
           <p className="mt-7 text-center text-[12px] leading-relaxed text-muted-foreground">

@@ -190,7 +190,7 @@ export function flowFlags(data: UserData, tab: FlowTab): FlowFlag[] {
       id: "manual_payments",
       severity: "info",
       title: `${manual.length} ${manual.length === 1 ? "expense has" : "expenses have"} no autopay`,
-      body: `${formatMoney(total, currency)} per cycle is paid manually. Link a sandbox schedule to avoid missed payments, or keep paying by hand.`,
+      body: `${formatMoney(total, currency)} per cycle is paid manually. Link an autopay schedule to avoid missed payments, or keep paying by hand.`,
     });
   }
 
@@ -257,7 +257,7 @@ function autopayFlags(data: UserData): FlowFlag[] {
       id: "failed_runs",
       severity: "warning",
       title: `${failed.length} payout ${failed.length === 1 ? "run" : "runs"} failed`,
-      body: "The sandbox rejected the last attempts. Check the receiver's PayPal email and retry the schedule.",
+      body: "The last attempts were rejected. Check the receiver's PayPal email and retry the schedule.",
     });
   }
 
@@ -269,7 +269,7 @@ function autopayFlags(data: UserData): FlowFlag[] {
       id: "wallet_short",
       severity: "critical",
       title: "Wallet won't cover the next 7 days",
-      body: `${formatMoney(dueIn7, currency)} is due from active schedules, but the sandbox wallet holds ${formatMoney(data.profile.walletBalance, currency)}. Top up before running them.`,
+      body: `${formatMoney(dueIn7, currency)} is due from active schedules, but your wallet holds ${formatMoney(data.profile.walletBalance, currency)}. Top up before running them.`,
     });
   }
 

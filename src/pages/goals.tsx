@@ -7,7 +7,7 @@ import { Area, AreaChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YA
 import { PageHeader, Badge, EmptyState, InfoNote } from "@/components/ui/misc";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { Checkbox, Input, Label, Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/form";
+import { Input, Label, Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/form";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { CategoryIcon } from "@/components/ui/category-icon";
 import { Money, MoneyInput } from "@/components/ui/money";
@@ -53,7 +53,6 @@ export default function GoalsPage() {
 
   const [contributeFor, setContributeFor] = useState<Goal | null>(null);
   const [contribution, setContribution] = useState("");
-  const [fromWallet, setFromWallet] = useState(true);
   const [deleteTarget, setDeleteTarget] = useState<Goal | null>(null);
 
   const totals = savingsGoalTotals(data.goals);
@@ -106,18 +105,20 @@ export default function GoalsPage() {
       return;
     }
     const startInr = Math.min(parseToInr(savedStart || "0", currency), targetInr);
+    if (startInr - (editing?.saved ?? 0) > data.profile.walletBalance) {
+      toast.error("Not enough in your wallet. Add money first.");
+      return;
+    }
     if (editing) {
       const prevSaved = editing.saved;
       updateGoal(editing.id, {
         name: name.trim(),
         target: targetInr,
-        saved: startInr,
         deadline,
         autoMonthly: autoInr,
         icon,
         color,
       });
-      // Changing the saved amount moves wallet money to match, with rows.
       const delta = startInr - prevSaved;
       if (delta > 0) contributeToGoal(editing.id, delta);
       else if (delta < 0) withdrawFromGoal(editing.id, -delta);
@@ -141,7 +142,6 @@ export default function GoalsPage() {
   function openContribute(goal: Goal) {
     setContributeFor(goal);
     setContribution(goal.autoMonthly ? formatAmountInput(goal.autoMonthly, currency) : "");
-    setFromWallet(true);
   }
 
   function addContribution() {
@@ -151,17 +151,17 @@ export default function GoalsPage() {
       toast.error("Enter an amount above zero.");
       return;
     }
-    if (fromWallet && amt > data.profile.walletBalance) {
-      toast.error("Not enough in your PayPal wallet", {
-        description: `Wallet balance is ${formatMoney(data.profile.walletBalance, currency)}. Turn off “move from wallet” or add money first.`,
+    const room = Math.max(0, contributeFor.target - contributeFor.saved);
+    const applied = Math.min(amt, room);
+    if (applied > data.profile.walletBalance) {
+      toast.error("Not enough in your wallet", {
+        description: `Wallet balance is ${formatMoney(data.profile.walletBalance, currency)}. Add money first.`,
       });
       return;
     }
-    const room = Math.max(0, contributeFor.target - contributeFor.saved);
-    const applied = Math.min(amt, room);
-    contributeToGoal(contributeFor.id, applied, fromWallet);
+    contributeToGoal(contributeFor.id, applied);
     toast.success(`${formatMoney(applied, currency)} added to ${contributeFor.name}`, {
-      description: fromWallet ? "Moved from your PayPal wallet." : "Recorded without moving wallet money.",
+      description: "Moved from your wallet and recorded as a savings transfer.",
     });
     setContributeFor(null);
   }
@@ -346,7 +346,7 @@ export default function GoalsPage() {
       </div>
 
       <InfoNote className="mt-4" icon={<PiggyBank />}>
-        Contributions can be bookkeeping-only or moved from your PayPal wallet. Wallet moves update your local ledger only — no PayPal charge is made.
+        Contributions move money out of your wallet into savings. Deleting a goal returns its saved amount to your wallet. Both movements are recorded as transfers, not spending or income.
       </InfoNote>
 
       <Dialog open={formOpen} onOpenChange={setFormOpen}>
@@ -434,15 +434,7 @@ export default function GoalsPage() {
               <Label htmlFor="goal-contribution">Contribution</Label>
               <MoneyInput id="goal-contribution" value={contribution} currency={currency} onChange={setContribution} />
             </div>
-            <label htmlFor="goal-from-wallet" className="flex items-start gap-2.5 rounded-xl border border-border/70 p-3 text-[12px]">
-              <Checkbox id="goal-from-wallet" checked={fromWallet} onCheckedChange={(v) => setFromWallet(v === true)} className="mt-0.5" />
-              <span>
-                <span className="font-medium">Move from PayPal wallet</span>
-                <span className="mt-0.5 block text-[11px] leading-relaxed text-muted-foreground">
-                  Wallet balance: {formatMoney(data.profile.walletBalance, currency)}. Turn off for bookkeeping-only contributions.
-                </span>
-              </span>
-            </label>
+            <InfoNote>Moved from your wallet. Available: {formatMoney(data.profile.walletBalance, currency)}.</InfoNote>
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setContributeFor(null)}>Cancel</Button>

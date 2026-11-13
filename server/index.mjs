@@ -369,6 +369,25 @@ function getUserSandbox(userId) {
   return null;
 }
 
+// One sandbox account per Wallet Guardian account: the same Client ID can
+// never be attached twice. Ciphertexts are randomized, so compare decrypted
+// client IDs. Callers must run the check and the insert without awaiting in
+// between — Node is single-threaded, which makes check-then-insert atomic.
+function sandboxClientIdOwner(clientId) {
+  const wanted = String(clientId || "").trim();
+  if (!wanted) return null;
+  const rows = accountsDb.prepare("SELECT user_id, value FROM user_sandbox_credentials").all();
+  for (const row of rows) {
+    try {
+      const saved = decryptSetting(row.value);
+      if (String(saved?.clientId || "").trim() === wanted) return row.user_id;
+    } catch {
+      // Unreadable rows can't be compared; they also can't be used.
+    }
+  }
+  return null;
+}
+
 function loadStoredSandboxCredentials() {
   if (sandboxConfigured()) return;
   const row = settingsDb.prepare("SELECT value FROM app_settings WHERE key = ?").get("paypal_sandbox");
@@ -610,9 +629,26 @@ app.post("/api/paypal/sandbox/connect", async (req, res) => {
   } catch {
     return res.status(502).json({ error: "Could not reach the PayPal sandbox to verify the credentials. Try again." });
   }
-  accountsDb
-    .prepare("INSERT INTO user_sandbox_credentials (user_id, value, created_at) VALUES (?, ?, ?)")
-    .run(session.user.id, encryptSetting({ clientId, clientSecret, invoicerEmail: "", payoutsEnabled: true }), new Date().toISOString());
+  // No await between these checks and the insert, so two concurrent connects
+  // can never both claim the same sandbox account.
+  if (getUserSandbox(session.user.id)) {
+    return res.status(409).json({ error: "This account already has sandbox credentials attached. They cannot be changed." });
+  }
+  if (sandboxClientIdOwner(clientId)) {
+    return res.status(409).json({
+      error: "These sandbox credentials already belong to another Wallet Guardian account. Use a different PayPal sandbox account.",
+    });
+  }
+  try {
+    accountsDb
+      .prepare("INSERT INTO user_sandbox_credentials (user_id, value, created_at) VALUES (?, ?, ?)")
+      .run(session.user.id, encryptSetting({ clientId, clientSecret, invoicerEmail: "", payoutsEnabled: true }), new Date().toISOString());
+  } catch (err) {
+    if (String(err?.code || "").includes("SQLITE_CONSTRAINT")) {
+      return res.status(409).json({ error: "This account already has sandbox credentials attached. They cannot be changed." });
+    }
+    throw err;
+  }
   console.log(`[paypal] personal sandbox credentials attached for ${session.user.email}`);
   const ctx = paypalContext(req);
   res.json({ connected: true, mode: "sandbox", source: "user", payoutsEnabled: true, capabilities: paypalCapabilities(ctx) });

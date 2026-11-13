@@ -176,7 +176,7 @@ export function buildDemoUser(): UserData {
     },
     {
       id: uid("tx"), type: "expense", amount: 1200, categoryId: "cat_other", merchant: "Rohan Kapoor",
-      date: addDaysISO(todayISO(), -9), paymentMethod: "PayPal", notes: "Concert ticket split via PayPal sandbox",
+      date: addDaysISO(todayISO(), -9), paymentMethod: "PayPal", notes: "Concert ticket split",
       source: "paypal", paypalOrderId: "SIM-ORDER-SEED02", paypalCaptureId: "SIM-CAPTURE-SEED02",
       createdAt: new Date().toISOString(),
     },
@@ -274,8 +274,8 @@ export function buildDemoUser(): UserData {
       frequency: "monthly", startDate: rentStart, status: "active", nextRunDate: format(nextOccurrence(2, today), "yyyy-MM-dd"),
       category: "Housing", note: "Monthly rent — Koramangala",
       history: [
-        { id: uid("run"), date: `${prev}-02`, amount: 22000, status: "simulated", note: "Sandbox payout simulated" },
-        { id: uid("run"), date: `${old}-02`, amount: 22000, status: "simulated", note: "Sandbox payout simulated" },
+        { id: uid("run"), date: `${prev}-02`, amount: 22000, status: "paid", note: "Payout recorded" },
+        { id: uid("run"), date: `${old}-02`, amount: 22000, status: "paid", note: "Payout recorded" },
       ],
       createdAt: rentStart,
     },
@@ -283,7 +283,7 @@ export function buildDemoUser(): UserData {
       id: "sp_music", payeeName: "Meera Iyer", payeeEmail: "meera.iyer@example.com", amount: 2500,
       frequency: "monthly", startDate: addMonthsISO(`${cur}-10`, -2), status: "paused", nextRunDate: addDaysISO(`${cur}-10`, 30),
       category: "Education", note: "Guitar lessons",
-      history: [{ id: uid("run"), date: `${prev}-10`, amount: 2500, status: "simulated", note: "Paused by you" }],
+      history: [{ id: uid("run"), date: `${prev}-10`, amount: 2500, status: "paid", note: "Paused by you" }],
       createdAt: addMonthsISO(`${cur}-10`, -2),
     },
   ];

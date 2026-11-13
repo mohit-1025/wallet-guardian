@@ -36,7 +36,9 @@ export function TransactionDialog({
 
   useEffect(() => {
     if (!open || !existing) return;
-    setCategoryId(existing.categoryId);
+    // Rows without info get a suggestion from their note first, then the merchant.
+    const guess = existing.needsInfo ? guessCategory(`${existing.notes ?? ""} ${existing.merchant}`, existing.type) : null;
+    setCategoryId(guess && guess.confidence >= 0.5 ? guess.categoryId : existing.categoryId);
     setNotes(existing.notes ?? "");
     setReceiptName(existing.receiptName);
     setReceiptData(existing.receiptData);

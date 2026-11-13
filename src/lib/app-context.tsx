@@ -35,6 +35,8 @@ import { enrichTransaction, flowsFromObligations, guessFlowTab } from "./flows";
 import { guessCategory } from "./categories";
 import { addDaysISO, addMonthsISO, monthKey, nextMonthKey } from "./dates";
 import { uid } from "./utils";
+import type { IncomingTransfer } from "./paypal";
+import { formatMoney } from "./money";
 
 interface OnboardingInput {
   monthlyIncome: number;
@@ -61,7 +63,7 @@ interface AppContextValue {
   setProfile: (patch: Partial<Profile>) => void;
   completeOnboarding: (input: OnboardingInput) => void;
   addTransaction: (tx: NewTransaction) => Transaction;
-  addTransactions: (txs: NewTransaction[]) => void;
+  receiveTransfers: (userId: string, transfers: IncomingTransfer[]) => void;
   updateTransaction: (id: string, patch: Partial<Transaction>) => void;
   replaceMonthBudget: (month: string, plan: { budget: Budget; envelopes: BudgetEnvelope[] }) => void;
   ensureBudget: (month: string) => void;
@@ -71,7 +73,7 @@ interface AppContextValue {
   addGoal: (goal: Omit<Goal, "id" | "createdAt" | "saved"> & { saved?: number }) => Goal;
   updateGoal: (id: string, patch: Partial<Goal>) => void;
   deleteGoal: (id: string) => void;
-  contributeToGoal: (id: string, amount: number, fromWallet?: boolean) => void;
+  contributeToGoal: (id: string, amount: number) => void;
   /** Pulls money back out of a goal vault into the wallet, with a matching ledger row. */
   withdrawFromGoal: (id: string, amount: number) => void;
   addSubscription: (sub: Omit<Subscription, "id" | "createdAt" | "priceHistory" | "lastUsedDaysAgo" | "status"> & Partial<Subscription>) => void;
@@ -293,10 +295,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
               type: "income",
               amount: credit,
               categoryId: "cat_refunds",
-              merchant: "Opening balance — sandbox credit",
+              merchant: "Opening balance",
               date: new Date().toISOString().slice(0, 10),
               paymentMethod: "PayPal",
-              notes: "Sandbox opening credit of $5,000 — excluded from income analytics",
+              notes: "Opening credit of $5,000 — excluded from income analytics",
               source: "paypal",
               transfer: true,
               channel: "paypal",
@@ -308,7 +310,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
           accounts: openingRow ? updateAccountBalance(d.accounts, "paypal", credit) : d.accounts,
           transactions: openingRow ? [enrichTransaction({ ...openingRow, id: uid("tx"), createdAt: now, source: openingRow.source ?? "manual" }), ...d.transactions] : d.transactions,
           notifications: credit
-            ? [{ id: uid("ntf"), kind: "credit", title: "Sandbox credit received", body: "Your account was credited with the $5,000 opening balance.", createdAt: now }, ...d.notifications]
+            ? [{ id: uid("ntf"), kind: "credit", title: "Wallet credited", body: "Your account was credited with the $5,000 opening balance.", createdAt: now }, ...d.notifications]
             : d.notifications,
           goals: [...d.goals, ...goals],
           flowExpenses: [...d.flowExpenses, ...onboardingFlows],
@@ -335,14 +337,40 @@ export function AppProvider({ children }: { children: ReactNode }) {
     [update],
   );
 
-  const addTransactions = useCallback(
-    (txs: NewTransaction[]) => {
-      const stamp = new Date().toISOString();
-      const full = txs.map((tx) => enrichTransaction({ ...tx, id: uid("tx"), source: tx.source ?? "import" as const, createdAt: stamp }));
-      update((d) => ({ ...d, transactions: [...full, ...d.transactions] }));
-    },
-    [update],
-  );
+  const receiveTransfers = useCallback((userId: string, transfers: IncomingTransfer[]) => {
+    const d = getUserData(userId);
+    if (!d) return;
+    const ids = new Set(d.transactions.map((t) => t.id));
+    const fresh = transfers.filter((t) => {
+      if (ids.has(`incoming_${t.id}`)) return false;
+      ids.add(`incoming_${t.id}`);
+      return true;
+    });
+    if (!fresh.length) return;
+    const rows = fresh.map((t): Transaction => {
+      const guess = guessCategory(`${t.note} ${t.fromName}`, "income");
+      return enrichTransaction({
+        id: `incoming_${t.id}`, type: "income", amount: Math.round(t.amountInr),
+        categoryId: guess.confidence >= 0.5 ? guess.categoryId : "cat_other",
+        merchant: t.fromName || t.fromEmail, date: t.createdAt.slice(0, 10),
+        paymentMethod: "PayPal", notes: t.note || `Payment from ${t.fromEmail}`,
+        source: "paypal", channel: "paypal", needsInfo: guess.confidence < 0.5, createdAt: t.createdAt,
+      });
+    });
+    const credit = rows.reduce((sum, t) => sum + t.amount, 0);
+    const notifications = fresh.map((t): AppNotification => ({
+      id: `incoming_${t.id}`, kind: "transfer_received", title: "Money received", createdAt: t.createdAt,
+      body: `${t.fromName || t.fromEmail} sent you ${formatMoney(t.amountInr, d.profile.currency)}${t.note ? ` — ${t.note}` : "."}`,
+    }));
+    const next: UserData = {
+      ...d, transactions: [...rows, ...d.transactions],
+      profile: { ...d.profile, walletBalance: d.profile.walletBalance + credit },
+      accounts: updateAccountBalance(d.accounts, "paypal", credit),
+      notifications: [...notifications, ...d.notifications].slice(0, 50),
+    };
+    saveUserData(next);
+    setData((prev) => prev?.profile.id === userId ? next : prev);
+  }, []);
 
   const updateTransaction = useCallback(
     (id: string, patch: Partial<Transaction>) =>
@@ -477,37 +505,26 @@ export function AppProvider({ children }: { children: ReactNode }) {
     [update],
   );
 
-  // Adding to savings deducts the wallet and records a transfer row, so the
-  // ledger always explains the balance.
   const contributeToGoal = useCallback(
-    (id: string, amount: number, fromWallet = true) => {
-      const amt = Math.max(0, Math.round(amount));
+    (id: string, amount: number) => {
       update((d) => {
         const goal = d.goals.find((g) => g.id === id);
-        if (!goal || amt <= 0) return d;
+        if (!goal) return d;
+        const amt = Math.min(Math.max(0, Math.round(amount)), Math.max(0, goal.target - goal.saved));
+        if (amt <= 0 || amt > d.profile.walletBalance) return d;
         const now = new Date().toISOString();
-        const row = fromWallet
-          ? {
-              id: uid("tx"),
-              type: "expense" as const,
-              amount: amt,
-              categoryId: "cat_refunds",
-              merchant: `Savings — ${goal.name}`,
-              date: now.slice(0, 10),
-              paymentMethod: "PayPal",
-              notes: "Moved to savings goal — excluded from expense analytics",
-              source: "paypal" as const,
-              transfer: true,
-              channel: "paypal" as const,
-              createdAt: now,
-            }
-          : null;
+        const row: Transaction = {
+          id: uid("tx"), type: "expense", amount: amt, categoryId: "cat_refunds",
+          merchant: `Savings — ${goal.name}`, date: now.slice(0, 10), paymentMethod: "PayPal",
+          notes: "Moved to savings goal — excluded from expense analytics",
+          source: "paypal", transfer: true, channel: "paypal", createdAt: now,
+        };
         return {
           ...d,
-          goals: d.goals.map((g) => (g.id === id ? { ...g, saved: Math.min(g.target, g.saved + amt) } : g)),
-          transactions: row ? [row, ...d.transactions] : d.transactions,
-          profile: fromWallet ? { ...d.profile, walletBalance: Math.max(0, d.profile.walletBalance - amt) } : d.profile,
-          accounts: fromWallet ? updateAccountBalance(d.accounts, "paypal", -amt) : d.accounts,
+          goals: d.goals.map((g) => (g.id === id ? { ...g, saved: g.saved + amt } : g)),
+          transactions: [row, ...d.transactions],
+          profile: { ...d.profile, walletBalance: d.profile.walletBalance - amt },
+          accounts: updateAccountBalance(d.accounts, "paypal", -amt),
         };
       });
     },
@@ -517,10 +534,11 @@ export function AppProvider({ children }: { children: ReactNode }) {
   // Mirror of contributeToGoal for pulling money back out of a vault.
   const withdrawFromGoal = useCallback(
     (id: string, amount: number) => {
-      const amt = Math.max(0, Math.round(amount));
       update((d) => {
         const goal = d.goals.find((g) => g.id === id);
-        if (!goal || amt <= 0) return d;
+        if (!goal) return d;
+        const amt = Math.min(goal.saved, Math.max(0, Math.round(amount)));
+        if (amt <= 0) return d;
         const now = new Date().toISOString();
         return {
           ...d,
@@ -790,7 +808,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
                   id: uid("ntf"),
                   kind: "payment_sent" as const,
                   title: "Autopay sent",
-                  body: `₹${payment.amount.toLocaleString("en-IN")} sent to ${payment.payeeName}${run.status === "simulated" ? " (sandbox simulation)" : ""}.`,
+                  body: `₹${payment.amount.toLocaleString("en-IN")} sent to ${payment.payeeName}.`,
                   createdAt: new Date().toISOString(),
                 },
                 ...d.notifications,
@@ -937,7 +955,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       session, data, loading, bootError, authNotice, clearAuthNotice,
       signOut, signInGuest, signInAccount, createAccount, resetDemo, loadSample,
       setProfile, completeOnboarding,
-      addTransaction, addTransactions, updateTransaction,
+      addTransaction, receiveTransfers, updateTransaction,
       replaceMonthBudget, ensureBudget, updateEnvelope, moveEnvelopeMoney, rolloverMonth,
       addGoal, updateGoal, deleteGoal, contributeToGoal, withdrawFromGoal,
       addSubscription, updateSubscription, deleteSubscription,
@@ -951,7 +969,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     [
       session, data, loading, bootError, authNotice, clearAuthNotice, signOut, signInGuest, signInAccount, createAccount,
       resetDemo, loadSample, setProfile, completeOnboarding,
-      addTransaction, addTransactions, updateTransaction, replaceMonthBudget, ensureBudget,
+      addTransaction, receiveTransfers, updateTransaction, replaceMonthBudget, ensureBudget,
       updateEnvelope, moveEnvelopeMoney, rolloverMonth, addGoal, updateGoal, deleteGoal, contributeToGoal, withdrawFromGoal,
       addSubscription, updateSubscription, deleteSubscription, addBill, updateBill, deleteBill, markBillPaid,
       addFlowExpense, updateFlowExpense, deleteFlowExpense, initializeFlowExpenses,

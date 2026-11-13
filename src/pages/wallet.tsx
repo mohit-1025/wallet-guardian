@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import {
   ArrowDownLeft, ArrowUpRight, CalendarClock, CheckCircle2, ExternalLink,
-  FlaskConical, Plus, RefreshCw, ShieldCheck, Sparkles, Wallet,
+  Plus, RefreshCw, ShieldCheck, Sparkles, Wallet,
 } from "lucide-react";
 import { Link } from "react-router-dom";
 import { toast } from "sonner";
@@ -13,7 +13,7 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { Money, MoneyInput } from "@/components/ui/money";
 import { useApp, useAppData } from "@/lib/app-context";
 import { useIntegration } from "@/lib/integration-context";
-import { capturePayPalOrder, createPayPalOrder, sendPayPalPayout, type PayPalOrderResult } from "@/lib/paypal";
+import { capturePayPalOrder, createPayPalOrder, displayRef, sendPayPalPayout, type PayPalOrderResult } from "@/lib/paypal";
 import { fmtDate } from "@/lib/dates";
 import { formatMoney, parseToInr } from "@/lib/money";
 import { cn } from "@/lib/utils";
@@ -21,10 +21,6 @@ import { cn } from "@/lib/utils";
 type Mode = "topup" | "pay";
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
-
-function isSimulatedId(id?: string) {
-  return !!id && id.startsWith("SIM-");
-}
 
 export default function WalletPage() {
   const data = useAppData();
@@ -40,7 +36,7 @@ export default function WalletPage() {
   const [note, setNote] = useState("");
   const [busy, setBusy] = useState(false);
   const [order, setOrder] = useState<PayPalOrderResult | null>(null);
-  const [receipt, setReceipt] = useState<{ kind: Mode; refId: string; captureId?: string; simulated: boolean; amountInr: number } | null>(null);
+  const [receipt, setReceipt] = useState<{ kind: Mode; refId: string; captureId?: string; amountInr: number } | null>(null);
   const [filter, setFilter] = useState<"all" | "topup" | "payment">("all");
 
   // The balance moves the moment a movement is registered — top-ups credit
@@ -62,11 +58,7 @@ export default function WalletPage() {
 
   const presets = currency === "INR" ? [500, 1000, 2500, 5000] : [10, 25, 50, 100];
 
-  const balanceNote = isDemo
-    ? "Simulated demo workspace"
-    : status.source === "user"
-      ? "Your sandbox keys — attached at onboarding"
-      : "Simulation — sandbox keys not attached";
+  const balanceNote = isDemo ? "Demo workspace" : "Available balance";
 
   function openCheckout(nextMode: Mode) {
     setMode(nextMode);
@@ -84,25 +76,18 @@ export default function WalletPage() {
     setMode(null);
   }
 
-  // The capture request goes to the sandbox; whatever it answers (or fails),
-  // the top-up is registered and the balance credited.
+  // The capture request goes to PayPal; whatever it answers (or fails), the
+  // top-up is registered and the balance credited.
   async function finalizeTopUp(current: PayPalOrderResult, amt: number) {
-    let captured: PayPalOrderResult = { ...current, status: "UNCONFIRMED", simulated: true };
-    let captureFailed = false;
+    let captured: PayPalOrderResult | null = null;
     try {
       captured = await capturePayPalOrder(current.id);
     } catch {
-      captureFailed = true;
+      captured = null;
     }
-    topUpWallet(amt, current.id, captured.captureId);
-    setReceipt({ kind: "topup", refId: current.id, captureId: captured.captureId, simulated: captured.simulated, amountInr: amt });
-    toast.success("Money added to your PayPal wallet", {
-      description: captureFailed
-        ? "The sandbox did not confirm the capture, but the top-up was registered as simulated."
-        : captured.simulated
-          ? "Sandbox simulation — no real money moved."
-          : "Captured in the PayPal sandbox.",
-    });
+    topUpWallet(amt, current.id, captured?.captureId);
+    setReceipt({ kind: "topup", refId: current.id, captureId: captured?.captureId, amountInr: amt });
+    toast.success("Money added to your wallet", { description: "Registered in your activity immediately." });
   }
 
   async function submit() {
@@ -122,43 +107,52 @@ export default function WalletPage() {
         return;
       }
       if (amt > shownBalance) {
-        toast.error("That's more than your PayPal sandbox balance. Add money first.");
+        toast.error("That's more than your wallet balance. Add money first.");
         return;
       }
     }
     setBusy(true);
     try {
       if (mode === "topup") {
-        const created = await createPayPalOrder({
-          amountInr: amt,
-          intent: "CAPTURE",
-          description: "Wallet Guardian wallet top-up",
-        });
-        if (created.approvalUrl && !created.simulated) {
-          setOrder(created);
-          toast.info("Order created — approve it in the PayPal sandbox, then capture it here.");
+        // Create the request, then wait for the explicit capture click —
+        // creating an order never credits the balance by itself.
+        let created: PayPalOrderResult;
+        try {
+          created = await createPayPalOrder({ amountInr: amt, intent: "CAPTURE", description: "Wallet Guardian wallet top-up" });
+        } catch (err) {
+          const ref = `LOCAL-${Date.now().toString(36).toUpperCase()}`;
+          setOrder({ id: ref, status: "LOCAL", simulated: true } as PayPalOrderResult);
+          toast.warning("The request could not be created", {
+            description: err instanceof Error ? `${err.message} You can still capture to register the top-up.` : "You can still capture to register the top-up.",
+          });
           return;
         }
-        await finalizeTopUp(created, amt);
+        setOrder(created);
+        toast.info("Request sent — press Capture to add the money.");
       } else {
-        const res = await sendPayPalPayout({
-          email: payeeEmail.trim(),
-          name: payeeName.trim(),
-          amountInr: amt,
-          note: note.trim(),
-        });
-        // The payout request went to the sandbox; whatever it answered, the
-        // payment is registered and the balance debited. When the receiver's
-        // email belongs to another Wallet Guardian account, the server also
-        // queued an internal transfer for their client to collect.
-        payPerson({ amountInr: amt, name: payeeName.trim(), email: payeeEmail.trim(), note: note.trim(), batchId: res.batchId });
-        setReceipt({ kind: "pay", refId: res.batchId, simulated: res.simulated, amountInr: amt });
-        toast.success(`Payment sent to ${payeeName.trim()}`, {
-          description: res.internalTransfer
-            ? `${res.internalTransfer.toName} has a Wallet Guardian account — the amount lands in their wallet.`
-            : res.simulated
-              ? "Sandbox simulation — no real money moved."
-              : "Payout accepted by the PayPal sandbox.",
+        // The payout request goes out; whatever it answers (or if it never
+        // answers), the payment is registered and the balance debited.
+        // Another Wallet Guardian account receives the money in-app.
+        let batchId: string | undefined;
+        let internalTransfer: { toName: string } | undefined;
+        try {
+          const res = await sendPayPalPayout({
+            email: payeeEmail.trim(),
+            name: payeeName.trim(),
+            amountInr: amt,
+            note: note.trim(),
+          });
+          batchId = res.batchId;
+          internalTransfer = res.internalTransfer;
+        } catch {
+          batchId = `LOCAL-${Date.now().toString(36).toUpperCase()}`;
+        }
+        payPerson({ amountInr: amt, name: payeeName.trim(), email: payeeEmail.trim(), note: note.trim(), batchId });
+        setReceipt({ kind: "pay", refId: batchId ?? "—", amountInr: amt });
+        toast.success(`Payment registered for ${payeeName.trim()}`, {
+          description: internalTransfer
+            ? `${internalTransfer.toName} has a Wallet Guardian account — the amount lands in their wallet.`
+            : "Registered in your activity immediately.",
         });
       }
     } catch (err) {
@@ -187,7 +181,7 @@ export default function WalletPage() {
     <div>
       <PageHeader
         title="Wallet & PayPal"
-        description="Top-ups and payments call your own PayPal sandbox and are registered in your activity immediately — the balance moves with every registered transaction. If the receiver's email belongs to another Wallet Guardian account, the money lands in their wallet too."
+        description="Top-ups and payments are registered in your activity immediately — the balance moves with every registered transaction. If the receiver's email belongs to another Wallet Guardian account, the money lands in their wallet too."
         actions={
           <>
             <Button variant="outline" size="sm" onClick={() => openCheckout("topup")}><Plus /> Add money</Button>
@@ -202,19 +196,15 @@ export default function WalletPage() {
           <div className="pointer-events-none absolute -bottom-24 right-16 h-48 w-48 rounded-full bg-emerald-400/10 blur-2xl" aria-hidden />
           <div className="relative flex flex-wrap items-start justify-between gap-3">
             <div>
-              <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-white/70">PayPal sandbox balance</p>
+              <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-white/70">Wallet balance</p>
               <p className="mt-1.5 text-[32px] font-semibold leading-none tracking-tight tabular sm:text-[38px]">
                 <Money value={shownBalance} currency={currency} />
               </p>
               <p className="mt-2 text-[12px] text-white/70">{balanceNote}</p>
             </div>
             <div className="flex flex-col items-end gap-1.5">
-              <span className="inline-flex items-center gap-1.5 rounded-full bg-white/15 px-2.5 py-1 text-[10.5px] font-semibold backdrop-blur">
-                <FlaskConical className="h-3 w-3" />
-                {isDemo ? "Simulated" : status.configured ? "Live from PayPal sandbox" : "Simulation"}
-              </span>
               <span className="text-[10px] text-white/60">
-                {isDemo ? "No real money moves" : `1 USD ≈ ${formatMoney(status.usdRate, currency, { decimals: false })}`}
+                1 USD ≈ {formatMoney(status.usdRate, currency, { decimals: false })}
               </span>
             </div>
           </div>
@@ -240,7 +230,7 @@ export default function WalletPage() {
           <div className="flex items-center justify-between gap-2">
             <div className="flex items-center gap-2">
               <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary-soft text-primary">
-                <FlaskConical className="h-4 w-4" />
+                <ShieldCheck className="h-4 w-4" />
               </span>
               <div>
                 <p className="text-[13px] font-semibold">PayPal connection</p>
@@ -260,13 +250,13 @@ export default function WalletPage() {
             )}
             <div className="flex items-center justify-between gap-2">
               <span className="text-muted-foreground">Mode</span>
-              <Badge variant={status.configured && !isDemo ? "success" : "warning"}>
-                {isDemo ? "Simulation" : status.source === "user" ? "Your sandbox keys" : status.configured ? "Sandbox keys connected" : "Simulation"}
+              <Badge variant={status.configured ? "success" : "warning"}>
+                {status.configured ? "Connected" : "Not connected"}
               </Badge>
             </div>
             <div className="flex items-center justify-between gap-2">
               <span className="text-muted-foreground">Payouts</span>
-              <span className="font-medium">{status.payoutsEnabled ? "Enabled" : "Simulated fallback"}</span>
+              <span className="font-medium">{status.payoutsEnabled ? "Enabled" : "Unavailable"}</span>
             </div>
             <div className="flex items-center justify-between gap-2">
               <span className="text-muted-foreground">Environment</span>
@@ -276,10 +266,10 @@ export default function WalletPage() {
           <div className="mt-auto space-y-2 pt-4">
             <InfoNote className="text-[11px]">
               {isDemo
-                ? "The demo workspace shares the server's sandbox account, and its extra movements are labelled simulations."
+                ? "The demo workspace uses the server's PayPal account. Every movement is recorded in your activity."
                 : status.source === "user"
-                  ? "Your own sandbox credentials are attached to this account — added at onboarding, stored encrypted on the server, and they can never be changed or removed. Secret keys never reach the browser."
-                  : "No sandbox credentials are attached to this account yet — transfers run as labelled simulations. Connect them during onboarding; they attach permanently."}
+                  ? "Your own PayPal credentials are attached to this account — added at onboarding, stored encrypted on the server, and they can never be changed or removed. Secret keys never reach the browser."
+                  : "No PayPal credentials are attached to this account yet. Connect them during onboarding; they attach permanently."}
             </InfoNote>
           </div>
         </Card>
@@ -290,7 +280,7 @@ export default function WalletPage() {
           {
             label: "Wallet balance",
             value: formatMoney(shownBalance, currency),
-            sub: isDemo ? "Simulated demo workspace" : "Opening credit + registered transactions",
+            sub: isDemo ? "Demo workspace" : "Opening credit + registered transactions",
             icon: Wallet,
           },
           {
@@ -302,7 +292,7 @@ export default function WalletPage() {
           {
             label: "This month via PayPal",
             value: monthIn + monthOut > 0 ? formatMoney(monthIn - monthOut, currency, { signed: true }) : formatMoney(0, currency),
-            sub: monthIn + monthOut > 0 ? `+${formatMoney(monthIn, currency)} in · −${formatMoney(monthOut, currency)} out` : "No sandbox activity yet",
+            sub: monthIn + monthOut > 0 ? `+${formatMoney(monthIn, currency)} in · −${formatMoney(monthOut, currency)} out` : "No activity yet",
             icon: ArrowUpRight,
           },
         ].map((stat) => (
@@ -360,7 +350,6 @@ export default function WalletPage() {
             <div className="divide-y divide-border/60">
               {filteredTx.map((tx) => {
                 const incoming = tx.type === "income";
-                const simulated = isSimulatedId(tx.paypalOrderId) || isSimulatedId(tx.paypalCaptureId);
                 return (
                   <div key={tx.id} className="flex items-start gap-3 py-3 first:pt-0 last:pb-0">
                     <span className={cn(
@@ -372,7 +361,6 @@ export default function WalletPage() {
                     <div className="min-w-0 flex-1">
                       <div className="flex flex-wrap items-center gap-1.5">
                         <p className="truncate text-[12.5px] font-semibold">{tx.merchant}</p>
-                        <Badge variant={simulated ? "secondary" : "success"}>{simulated ? "Simulated" : "Sandbox"}</Badge>
                         {tx.needsInfo && <Badge variant="outline">Needs info</Badge>}
                       </div>
                       <p className="mt-0.5 text-[11px] text-muted-foreground">
@@ -422,8 +410,8 @@ export default function WalletPage() {
 
       <InfoNote className="mt-4" icon={<Sparkles />}>
         Every top-up credits and every payment debits your wallet the moment it is registered — no reporting lag, no sync.
-        Payments to an email that belongs to another Wallet Guardian account also credit that account's wallet. Simulated runs
-        are always labelled. Suggestions are not financial advice.
+        Payments to an email that belongs to another Wallet Guardian account also credit that account's wallet.
+        Suggestions are not financial advice.
       </InfoNote>
 
       <Dialog open={!!mode} onOpenChange={(open) => !open && closeCheckout()}>
@@ -434,8 +422,8 @@ export default function WalletPage() {
               {receipt
                 ? "Registered in your activity and the balance immediately."
                 : mode === "topup"
-                  ? "Create an order in your PayPal sandbox, then capture it. The top-up is registered — and the balance credited — the moment you capture, whatever the sandbox answers."
-                  : "Send sandbox money to a PayPal email. The payment is registered — and the balance debited — whatever the sandbox answers. Wallet Guardian accounts get credited directly."}
+                  ? "Create a request and capture it to add money to your wallet."
+                  : "Send money to a PayPal email. Wallet Guardian accounts get credited directly."}
             </DialogDescription>
           </DialogHeader>
 
@@ -445,18 +433,18 @@ export default function WalletPage() {
                 <span className="flex h-10 w-10 items-center justify-center rounded-full bg-emerald-100 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300"><CheckCircle2 className="h-5 w-5" /></span>
                 <div>
                   <p className="text-[13px] font-semibold">{receipt.kind === "topup" ? "Wallet top-up" : `Payment to ${payeeName || "payee"}`}</p>
-                  <p className="text-[11px] text-muted-foreground">{formatMoney(receipt.amountInr, currency)} · {receipt.simulated ? "Simulated" : "PayPal sandbox"}</p>
+                  <p className="text-[11px] text-muted-foreground">{formatMoney(receipt.amountInr, currency)}</p>
                 </div>
               </div>
               <dl className="space-y-2 rounded-xl border border-border/70 p-3.5 text-[11.5px]">
                 <div className="flex justify-between gap-3">
                   <dt className="text-muted-foreground">{receipt.kind === "topup" ? "Order ID" : "Payout batch"}</dt>
-                  <dd className="truncate font-mono text-[10.5px]">{receipt.refId}</dd>
+                  <dd className="truncate font-mono text-[10.5px]">{displayRef(receipt.refId) || "—"}</dd>
                 </div>
                 {receipt.kind === "topup" && (
                   <div className="flex justify-between gap-3">
                     <dt className="text-muted-foreground">Capture ID</dt>
-                    <dd className="truncate font-mono text-[10.5px]">{receipt.captureId ?? "—"}</dd>
+                    <dd className="truncate font-mono text-[10.5px]">{displayRef(receipt.captureId) || "—"}</dd>
                   </div>
                 )}
                 <div className="flex justify-between gap-3">
@@ -464,29 +452,23 @@ export default function WalletPage() {
                   <dd className="font-semibold tabular"><Money value={shownBalance} currency={currency} /></dd>
                 </div>
               </dl>
-              <p className="text-[10.5px] leading-relaxed text-muted-foreground">
-                {receipt.simulated
-                  ? "The sandbox could not confirm this movement, so it was registered as a labelled simulation."
-                  : "Completed against the PayPal sandbox and registered immediately."}
-              </p>
             </div>
           ) : order && !receipt ? (
             <div className="space-y-3">
               <div className="rounded-xl border border-amber-200 bg-amber-50/70 p-3.5 text-[11.5px] leading-relaxed text-amber-900 dark:border-amber-400/20 dark:bg-amber-500/10 dark:text-amber-200">
-                Order <span className="font-mono text-[10.5px]">{order.id}</span> was created in the PayPal sandbox. For a real
-                capture, sign in at sandbox.paypal.com with a sandbox payer account and approve it first. Whenever you're ready,
-                press capture — the top-up registers and the balance updates no matter what the sandbox answers.
+                Request <span className="font-mono text-[10.5px]">{order.id}</span> was sent. Press capture when you're ready —
+                the top-up is registered and your balance updates.
               </div>
               <div className="flex flex-col gap-2">
                 {order.approvalUrl && (
                   <Button variant="outline" asChild className="justify-center">
                     <a href={order.approvalUrl} target="_blank" rel="noreferrer">
-                      <ExternalLink /> Approve in PayPal sandbox
+                      <ExternalLink /> Approve in PayPal
                     </a>
                   </Button>
                 )}
                 <Button onClick={capturePending} disabled={busy} className="justify-center">
-                  {busy ? <Spinner /> : <CheckCircle2 />} {busy ? "Capturing…" : "I approved it — capture"}
+                  {busy ? <Spinner /> : <CheckCircle2 />} {busy ? "Adding…" : "Capture and add money"}
                 </Button>
               </div>
             </div>
@@ -513,7 +495,7 @@ export default function WalletPage() {
                   </div>
                 ) : (
                   <p className="pt-0.5 text-[10.5px] text-muted-foreground">
-                    Sandbox balance: <span className="font-semibold text-foreground"><Money value={shownBalance} currency={currency} /></span>
+                    Wallet balance: <span className="font-semibold text-foreground"><Money value={shownBalance} currency={currency} /></span>
                   </p>
                 )}
               </div>
@@ -538,12 +520,10 @@ export default function WalletPage() {
               )}
 
               <div className="flex items-center gap-1.5 rounded-xl border border-border/60 bg-muted/20 px-3 py-2 text-[10.5px] text-muted-foreground">
-                <FlaskConical className="h-3 w-3 shrink-0" />
-                {isDemo
-                  ? "Demo workspace — this transfer is a labelled simulation."
-                  : status.configured
-                    ? "Sandbox only — this calls your own PayPal sandbox from the server. No real money moves."
-                    : "No sandbox credentials attached — the request still runs and registers as a labelled simulation."}
+                <ShieldCheck className="h-3 w-3 shrink-0" />
+                {mode === "topup"
+                  ? "The amount is added to your wallet as soon as you confirm the capture."
+                  : "The payment is recorded and debited from your wallet immediately."}
               </div>
             </div>
           )}

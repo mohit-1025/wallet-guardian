@@ -49,6 +49,8 @@ export default function RemindersPage() {
   const [recordTx, setRecordTx] = useState(true);
   const [deleteTarget, setDeleteTarget] = useState<Reminder | null>(null);
 
+  const [invoiceFor, setInvoiceFor] = useState<Reminder | null>(null);
+  const [invoiceDate, setInvoiceDate] = useState(todayISO());
   const [requestFor, setRequestFor] = useState<Reminder | null>(null);
   const [requesting, setRequesting] = useState(false);
   const [invoiceResult, setInvoiceResult] = useState<InvoiceResult | null>(null);
@@ -187,8 +189,8 @@ export default function RemindersPage() {
       });
       setInvoiceResult(res);
       updateReminder(requestFor.id, { paypalInvoiceId: res.invoiceId, paypalInvoiceUrl: res.invoiceUrl });
-      toast.success(res.simulated ? "Simulated invoice draft created" : "PayPal sandbox invoice scheduled", {
-        description: res.simulated ? res.message : `Invoice ${res.invoiceId} · due ${fmtDate(requestFor.dueDate, "d MMM yyyy")}`,
+      toast.success("Invoice sent", {
+        description: `Invoice ${res.invoiceId} · due ${fmtDate(requestFor.dueDate, "d MMM yyyy")}`,
       });
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Could not create the invoice.");
@@ -198,24 +200,62 @@ export default function RemindersPage() {
   }
 
   // "I owe" reminders can be turned into a one-time autopay run on the due
-  // date, so the money leaves the wallet on schedule through the sandbox.
+  // date, so the money leaves the wallet on schedule.
   function schedulePayment(rem: Reminder) {
     if (!rem.email) {
       toast.error("Add their email first", { description: "Edit the reminder and add a PayPal email so the scheduled payment has a payee." });
       return;
     }
-    addScheduledPayment({
+    const existing = rem.scheduledPaymentId
+      ? data.scheduledPayments.find((p) => p.id === rem.scheduledPaymentId && (p.status === "active" || p.status === "paused"))
+      : undefined;
+    if (existing) {
+      toast.info("This reminder already has a scheduled payment", {
+        description: `Next run ${fmtDate(existing.nextRunDate, "d MMM yyyy")}. Change or cancel it under Money flows → Autopay.`,
+      });
+      return;
+    }
+    const runDate = rem.dueDate < todayISO() ? todayISO() : rem.dueDate;
+    const scheduled = addScheduledPayment({
       payeeName: rem.person,
       payeeEmail: rem.email,
       amount: rem.amount,
       frequency: "once",
-      startDate: rem.dueDate,
+      startDate: runDate,
       category: "Other",
       note: rem.note || `Scheduled from reminder — ${rem.person}`,
     });
-    toast.success(`Payment scheduled for ${fmtDate(rem.dueDate, "d MMM yyyy")}`, {
-      description: `₹${rem.amount.toLocaleString("en-IN")} to ${rem.person} runs through your PayPal sandbox. Manage it under Money flows → Autopay.`,
+    updateReminder(rem.id, { scheduledPaymentId: scheduled.id });
+    toast.success(`Payment scheduled for ${fmtDate(runDate, "d MMM yyyy")}`, {
+      description: `₹${rem.amount.toLocaleString("en-IN")} to ${rem.person} runs through your PayPal account. It runs while the app is open, or when you return after the date. Manage it under Money flows → Autopay.`,
     });
+  }
+
+  function openScheduleInvoice(rem: Reminder) {
+    if (!rem.email) {
+      toast.error("Add their email first", { description: "Edit the reminder and add a PayPal email so the invoice can be sent." });
+      return;
+    }
+    setInvoiceFor(rem);
+    setInvoiceDate(rem.dueDate >= todayISO() ? rem.dueDate : todayISO());
+  }
+
+  function saveScheduleInvoice() {
+    if (!invoiceFor) return;
+    if (!invoiceDate || invoiceDate < todayISO()) {
+      toast.error("Pick today or a later date.");
+      return;
+    }
+    updateReminder(invoiceFor.id, { invoiceSendDate: invoiceDate, invoiceScheduleStatus: "scheduled" });
+    toast.success(`Invoice scheduled for ${fmtDate(invoiceDate, "d MMM yyyy")}`, {
+      description: "It is sent while the app is open on that date, or when you next open it.",
+    });
+    setInvoiceFor(null);
+  }
+
+  function cancelScheduledInvoice(rem: Reminder) {
+    updateReminder(rem.id, { invoiceSendDate: undefined, invoiceScheduleStatus: undefined });
+    toast.success("Scheduled invoice cancelled");
   }
 
   async function copyRequest() {
@@ -313,8 +353,11 @@ export default function RemindersPage() {
                         ) : dueSoon ? (
                           <Badge variant="warning">Due soon</Badge>
                         ) : null}
-                        {rem.paypalInvoiceId && (
+                        {rem.paypalInvoiceUrl && (
                           <Badge variant="outline"><Mail /> Request sent</Badge>
+                        )}
+                        {rem.invoiceScheduleStatus === "scheduled" && (
+                          <Badge variant="warning"><CalendarClock /> Invoice {fmtDate(rem.invoiceSendDate ?? rem.dueDate, "d MMM")}</Badge>
                         )}
                       </div>
                       <p className="mt-0.5 text-[11px] text-muted-foreground">
@@ -343,6 +386,16 @@ export default function RemindersPage() {
                           {rem.paypalInvoiceUrl ? "View request" : "Request"}
                         </Button>
                       )}
+                      {rem.direction === "owed" && rem.status === "open" && !rem.paypalInvoiceUrl && rem.invoiceScheduleStatus !== "scheduled" && (
+                        <Button size="sm" variant="ghost" onClick={() => openScheduleInvoice(rem)}>
+                          <CalendarClock /> Schedule invoice
+                        </Button>
+                      )}
+                      {rem.invoiceScheduleStatus === "scheduled" && (
+                        <Button size="sm" variant="ghost" onClick={() => cancelScheduledInvoice(rem)} title={`Scheduled for ${fmtDate(rem.invoiceSendDate ?? rem.dueDate, "d MMM yyyy")} — click to cancel`}>
+                          <CalendarClock /> Cancel invoice
+                        </Button>
+                      )}
                       {rem.status === "open" ? (
                         <Button size="sm" variant="ghost" onClick={() => openSettle(rem)}><Check /> Settle</Button>
                       ) : (
@@ -361,7 +414,7 @@ export default function RemindersPage() {
 
       <InfoNote className="mt-4" icon={<Sparkles />}>
         Owed reminders can send a PayPal invoice scheduled on the due date, and owed-by-you reminders can schedule a one-time payment
-        that runs through your sandbox on the due date — no real money moves. Settling here updates your local ledger; it doesn't transfer funds.{" "}
+        that runs on the due date. Settling here updates your local ledger; it doesn't transfer funds.{" "}
         Suggestions are not financial advice.
       </InfoNote>
 
@@ -414,6 +467,28 @@ export default function RemindersPage() {
         </DialogContent>
       </Dialog>
 
+      <Dialog open={!!invoiceFor} onOpenChange={(open) => !open && setInvoiceFor(null)}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Schedule invoice for {invoiceFor?.person}</DialogTitle>
+            <DialogDescription>
+              {invoiceFor ? `${formatMoney(invoiceFor.amount, currency)} · ${invoiceFor.email ?? "no email"}. A PayPal invoice is sent on the date you pick.` : ""}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3">
+            <div className="space-y-1.5">
+              <Label htmlFor="rem-invoice-date">Send on</Label>
+              <Input id="rem-invoice-date" type="date" min={todayISO()} value={invoiceDate} onChange={(e) => setInvoiceDate(e.target.value)} />
+            </div>
+            <InfoNote>Schedules run while this app is open on that date, or the next time you sign in — nothing is sent in the background.</InfoNote>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setInvoiceFor(null)}>Cancel</Button>
+            <Button onClick={saveScheduleInvoice}><CalendarClock /> Schedule invoice</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       <Dialog open={!!settleTarget} onOpenChange={(open) => !open && setSettleTarget(null)}>
         <DialogContent>
           <DialogHeader>
@@ -454,9 +529,7 @@ export default function RemindersPage() {
             <DialogTitle>Payment request</DialogTitle>
             <DialogDescription>
               Ask {requestFor?.person} for {requestFor ? formatMoney(requestFor.amount, currency) : ""}.
-              {integration.mode === "simulated"
-                ? " PayPal sandbox credentials aren't configured, so requests fall back to a simulated draft."
-                : " Requests are created in the PayPal sandbox."}
+              The request is created in PayPal.
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-3">
@@ -470,15 +543,11 @@ export default function RemindersPage() {
             {invoiceResult && (
               <div className="rounded-xl border border-border/70 bg-muted/30 p-3 text-[11.5px]">
                 <div className="flex flex-wrap items-center gap-2">
-                  <Badge variant={invoiceResult.simulated ? "secondary" : "success"}>
-                    {invoiceResult.simulated ? "Simulated" : "Sandbox invoice"}
-                  </Badge>
+                  <Badge variant="success">Invoice</Badge>
                   <span className="font-medium tabular">{invoiceResult.invoiceId}</span>
                 </div>
                 <p className="mt-1 leading-relaxed text-muted-foreground">
-                  {invoiceResult.simulated
-                    ? "No PayPal credentials configured. Copy the message above or connect PayPal on the server."
-                    : "Invoice drafted in the PayPal sandbox. Use the link to review or share it."}
+                  Invoice created in PayPal. Use the link to review or share it.
                 </p>
                 {invoiceResult.invoiceUrl && (
                   <a href={invoiceResult.invoiceUrl} target="_blank" rel="noreferrer" className="mt-2 inline-flex items-center gap-1 text-[11.5px] font-semibold text-primary hover:underline">
@@ -489,7 +558,7 @@ export default function RemindersPage() {
             )}
             <div className="flex items-center gap-1.5 rounded-xl border border-border/60 bg-muted/20 px-3 py-2 text-[10.5px] text-muted-foreground">
               <ReceiptText className="h-3 w-3 shrink-0" />
-              Sandbox only — no real money moves. Settle the reminder when you receive payment.
+              Settle the reminder when you receive payment.
             </div>
           </div>
           <DialogFooter>

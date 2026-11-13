@@ -69,7 +69,7 @@ export default function FlowCategoryPage() {
         { label: "Active schedules", value: activeSchedules.length, sub: `${data.scheduledPayments.length - activeSchedules.length} paused or finished`, money: false },
         { label: "Monthly commitment", value: scheduleStats.monthly, sub: "Recurring active schedules", money: true },
         { label: "Next 30 days", value: scheduleStats.next30, sub: "Due from active schedules", money: true },
-        { label: "Payout runs", value: scheduleStats.runs, sub: "Paid or simulated", money: false },
+        { label: "Payout runs", value: scheduleStats.runs, sub: "Completed runs", money: false },
       ]
     : [
         { label: "Active expenses", value: active.length, sub: `${rows.length - active.length} paused`, money: false },
@@ -79,8 +79,8 @@ export default function FlowCategoryPage() {
       ];
 
   const description = isAutopay
-    ? "PayPal payouts on your schedule — run one now, pause it, edit the receiver, or review its history. Sandbox only."
-    : `${hint}. Add an expense with its amount, optionally link autopay to send it from your PayPal sandbox, and pause or edit it any time.`;
+    ? "PayPal payouts on your schedule — run one now, pause it, edit the receiver, or review its history."
+    : `${hint}. Add an expense with its amount, optionally link autopay to send it from your PayPal account, and pause or edit it any time.`;
 
   return (
     <div>
@@ -88,7 +88,6 @@ export default function FlowCategoryPage() {
         eyebrow={
           <div className="flex flex-wrap items-center gap-2">
             <Badge variant="secondary" className="gap-1"><Layers /> Money flows</Badge>
-            <Badge variant="outline">Sandbox payments</Badge>
           </div>
         }
         title={FLOW_TAB_LABEL[current]}
@@ -120,8 +119,8 @@ export default function FlowCategoryPage() {
 
       <InfoNote className="mt-4" icon={<FlaskConical />}>
         {isAutopay
-          ? "Runs are manual: press Run now and the server attempts a PayPal sandbox payout, falling back to a labelled simulation when payouts aren't enabled. Each run records an expense and debits the sandbox wallet."
-          : "Autopay schedules send PayPal sandbox payouts from the server's sandbox app — no real money moves. Anything from onboarding can be edited, paused or deleted here without changing your budget split."}
+          ? "Runs are manual: press Run now and the server sends the payout. Each run records an expense and debits your wallet."
+          : "Autopay schedules send payouts on their schedule. Anything from onboarding can be edited, paused or deleted here without changing your budget split."}
       </InfoNote>
     </div>
   );

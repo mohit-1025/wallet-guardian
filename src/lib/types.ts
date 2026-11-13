@@ -170,6 +170,9 @@ export interface Reminder {
   note?: string;
   paypalInvoiceId?: string;
   paypalInvoiceUrl?: string;
+  invoiceSendDate?: string;
+  invoiceScheduleStatus?: "scheduled" | "sent" | "failed";
+  scheduledPaymentId?: string;
   createdAt: string;
 }
 

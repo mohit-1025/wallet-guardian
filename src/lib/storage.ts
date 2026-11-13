@@ -58,7 +58,55 @@ export function getUserData(userId: string): UserData | null {
   return migrated;
 }
 
+function cleanLabel(value?: string) {
+  if (!value) return value;
+  let out = value
+    .replace(/PayPal batch\s+SIMULATED/gi, "PayPal batch Recorded")
+    .replace(/\s*\(sandbox simulation\)/gi, "")
+    .replace(/\s*\(simulated\)/gi, "")
+    .replace(/\s+via PayPal sandbox/gi, "");
+  if (/^(simulated sandbox payout|sandbox payout simulated)$/i.test(out.trim())) out = "Payout recorded";
+  return out;
+}
+
+// Earlier builds labelled records as sandbox or simulated. Keep stored history
+// consistent with the current, uniform wording.
+function withLabelCleanup(data: UserData): UserData {
+  let changed = false;
+  const clean = (value?: string) => {
+    const next = cleanLabel(value);
+    if (next !== value) changed = true;
+    return next;
+  };
+  const cleanText = (value: string) => clean(value) ?? value;
+  const transactions = (Array.isArray(data.transactions) ? data.transactions : []).map((t) => {
+    const notes = clean(t.notes);
+    const merchant = cleanText(t.merchant);
+    return notes === t.notes && merchant === t.merchant ? t : { ...t, notes, merchant };
+  });
+  const scheduledPayments = (Array.isArray(data.scheduledPayments) ? data.scheduledPayments : []).map((p) => {
+    const note = clean(p.note);
+    const history = p.history.map((run) => {
+      const runNote = clean(run.note);
+      return runNote === run.note ? run : { ...run, note: runNote };
+    });
+    return note === p.note && history.every((run, i) => run === p.history[i]) ? p : { ...p, note, history };
+  });
+  const patientCheckouts = (Array.isArray(data.patientCheckouts) ? data.patientCheckouts : []).map((c) => {
+    const merchant = cleanText(c.merchant);
+    return merchant === c.merchant ? c : { ...c, merchant };
+  });
+  const notifications = (Array.isArray(data.notifications) ? data.notifications : []).map((n) => {
+    const title = cleanText(n.title);
+    const body = cleanText(n.body);
+    return title === n.title && body === n.body ? n : { ...n, title, body };
+  });
+  if (!changed) return data;
+  return { ...data, transactions, scheduledPayments, patientCheckouts, notifications };
+}
+
 function withFlowMigration(data: UserData): UserData {
+  data = withLabelCleanup(data);
   if (!Array.isArray(data.notifications)) data = { ...data, notifications: [] };
   const raw = Array.isArray(data.flowExpenses) ? data.flowExpenses : [];
   const existing = dedupeLegacyFlows(raw);
@@ -82,7 +130,7 @@ function withFlowMigration(data: UserData): UserData {
 }
 
 export function saveUserData(data: UserData) {
-  write(dataKey(data.profile.id), data);
+  localStorage.setItem(dataKey(data.profile.id), JSON.stringify(data));
 }
 
 /**
@@ -214,7 +262,7 @@ export function clearAllData() {
 export type Theme = "light" | "dark" | "system";
 
 export function getTheme(): Theme {
-  return read<Theme>(THEME_KEY, "system");
+  return read<Theme>(THEME_KEY, "light");
 }
 export function saveTheme(theme: Theme) {
   write(THEME_KEY, theme);

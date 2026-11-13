@@ -101,7 +101,7 @@ export default function SettingsPage() {
     <div className="space-y-4">
       <PageHeader
         title="Settings"
-        description="Your profile, how money is displayed, and the PayPal sandbox behind Wallet Guardian."
+        description="Your profile, how money is displayed, and the PayPal connection behind Wallet Guardian."
         eyebrow={<Badge variant="outline"><ShieldCheck /> Local-first workspace</Badge>}
       />
 
@@ -212,7 +212,7 @@ export default function SettingsPage() {
 
           <Card>
             <CardHeader className="flex-row items-center justify-between">
-              <CardTitle className="flex items-center gap-2"><CreditCard className="h-4 w-4 text-primary" />PayPal sandbox</CardTitle>
+              <CardTitle className="flex items-center gap-2"><CreditCard className="h-4 w-4 text-primary" />PayPal connection</CardTitle>
               <Button size="icon-sm" variant="ghost" onClick={refresh} disabled={integrationLoading} aria-label="Refresh integration status">
                 {integrationLoading ? <Spinner /> : <RefreshCw className="h-3.5 w-3.5" />}
               </Button>
@@ -221,12 +221,8 @@ export default function SettingsPage() {
               <div className="flex items-center justify-between gap-3">
                 <span className="text-muted-foreground">Status</span>
                 <Badge variant={integration.configured ? "success" : "warning"}>
-                  <CheckCircle2 />{integration.configured ? "Configured" : "Simulation fallback"}
+                  <CheckCircle2 />{integration.configured ? "Configured" : "Not configured"}
                 </Badge>
-              </div>
-              <div className="flex items-center justify-between gap-3">
-                <span className="text-muted-foreground">Mode</span>
-                <span className="font-medium uppercase">{integration.mode}</span>
               </div>
               <div className="flex items-center justify-between gap-3">
                 <span className="text-muted-foreground">Environment</span>
@@ -234,7 +230,7 @@ export default function SettingsPage() {
               </div>
               <div className="flex items-center justify-between gap-3">
                 <span className="text-muted-foreground">Payouts</span>
-                <span className="font-medium">{integration.payoutsEnabled ? "Enabled" : "Simulated"}</span>
+                <span className="font-medium">{integration.payoutsEnabled ? "Enabled" : "Unavailable"}</span>
               </div>
               <InfoNote icon={<ShieldCheck />} className="mt-1">
                 Credentials and session tokens live only in the server-side API process. The browser never receives your PayPal secret, and no request ever reaches the live PayPal API.
@@ -252,7 +248,7 @@ export default function SettingsPage() {
           <CardHeader>
             <CardTitle className="flex items-center gap-2"><Database className="h-4 w-4 text-primary" />Data & privacy</CardTitle>
             <p className="text-[11.5px] text-muted-foreground">
-              This build stores your workspace in this browser's local storage. Nothing is sent to a third party except the PayPal sandbox calls you trigger.
+              This build stores your workspace in this browser's local storage. Nothing is sent to a third party except the PayPal calls you trigger.
             </p>
           </CardHeader>
           <CardContent className="space-y-3">
@@ -292,8 +288,8 @@ export default function SettingsPage() {
               </div>
               <p className="mt-1 text-[10.5px] text-muted-foreground">
                 {session?.provider === "demo"
-                  ? "Guest demo session · sandbox only"
-                  : "Email account · sandbox payments"}{" "}
+                  ? "Guest demo session"
+                  : "Email account"}{" "}
                 · joined {new Date(data.profile.createdAt).toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" })}
               </p>
             </div>
@@ -305,10 +301,10 @@ export default function SettingsPage() {
                 </div>
                 <div className="flex items-center justify-between gap-3">
                   <span className="text-muted-foreground">Payments</span>
-                  <span className="text-right font-medium">Sandbox only</span>
+                  <span className="text-right font-medium">PayPal</span>
                 </div>
                 <p className="text-[10px] leading-relaxed text-muted-foreground">
-                  Your password is salted and hashed on the server. PayPal sandbox handles every payment, so no real money moves.
+                  Your password is salted and hashed on the server. PayPal handles every payment.
                 </p>
               </div>
             )}

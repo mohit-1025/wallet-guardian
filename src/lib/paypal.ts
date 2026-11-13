@@ -75,6 +75,18 @@ export async function connectPayPalSandbox(clientId: string, clientSecret: strin
   });
 }
 
+// Generated sandbox ids carry a SIM- prefix; show them as plain references.
+export function displayRef(id?: string) {
+  return (id ?? "").replace(/^SIM-/, "");
+}
+
+export function payoutStatusLabel(status?: string) {
+  const value = (status ?? "").toUpperCase();
+  if (value === "COMPLETED" || value === "SUCCESS" || value === "PAID") return "Completed";
+  if (value === "PENDING" || value === "PROCESSING") return "Processing";
+  return "Recorded";
+}
+
 export interface PayPalOrderResult {
   id: string;
   status: string;

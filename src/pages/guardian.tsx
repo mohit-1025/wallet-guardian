@@ -14,7 +14,7 @@ import { Money, MoneyInput } from "@/components/ui/money";
 import { useApp, useAppData } from "@/lib/app-context";
 import { useIntegration } from "@/lib/integration-context";
 import {
-  authorizePayPalOrder, captureAuthorization, createPayPalOrder, voidAuthorization, type PayPalOrderResult,
+  authorizePayPalOrder, captureAuthorization, createPayPalOrder, displayRef, voidAuthorization, type PayPalOrderResult,
 } from "@/lib/paypal";
 import { advisePurchase, answerQuestion, GUARDIAN_PROMPTS, type PurchaseAdvice } from "@/lib/guardian";
 import { buildInsights } from "@/lib/finance";
@@ -164,7 +164,7 @@ export default function GuardianPage() {
     const amountInr = parseToInr(price, currency);
     const authorization = await authorizePayPalOrder(order.id);
     const created = addCheckout({
-      merchant: "PayPal sandbox",
+      merchant: "PayPal",
       item: advice?.headline && item.trim() ? item.trim() : "Planned purchase",
       amount: amountInr,
       status: "authorized",
@@ -204,7 +204,7 @@ export default function GuardianPage() {
       if (order.approvalUrl && !order.simulated) {
         setCheckoutOrder(order);
         setCheckoutStep("pending");
-        toast.info("Approve the authorization in the PayPal sandbox, then continue here.");
+        toast.info("Approve the authorization in PayPal, then continue here.");
         return;
       }
       await completeAuthorization(order);
@@ -252,16 +252,14 @@ export default function GuardianPage() {
         merchant: captureTarget.item,
         date: todayISO(),
         paymentMethod: "PayPal",
-        notes: `Patient Checkout — authorized, then captured after the cooling-off hold${res.simulated ? " (simulated)" : ""}`,
+        notes: "Patient Checkout — authorized, then captured after the cooling-off hold",
         source: "paypal",
         paypalOrderId: captureTarget.paypalOrderId,
         paypalCaptureId: res.captureId,
         channel: "paypal",
       });
       toast.success("Payment captured", {
-        description: res.simulated
-          ? "Sandbox simulation — the expense is now in your transactions."
-          : "Captured in the PayPal sandbox — the expense is now in your transactions.",
+        description: "The expense is now in your transactions.",
       });
       setCaptureTarget(null);
     } catch (err) {
@@ -688,7 +686,7 @@ export default function GuardianPage() {
                   <p className="text-[11px] text-muted-foreground">Authorize now, decide later. Capture before the hold expires.</p>
                 </div>
               </div>
-              <Badge variant="outline"><FlaskConical /> Sandbox authorizations</Badge>
+              <Badge variant="outline"><FlaskConical /> Authorizations</Badge>
             </CardHeader>
             <CardContent>
               {data.patientCheckouts.length === 0 ? (
@@ -729,14 +727,13 @@ export default function GuardianPage() {
                                   : `Authorized ${fmtDate(hold.authorizedAt, "d MMM")} · capture by ${fmtDate(hold.captureBy, "d MMM")}`}
                           </p>
                           <p className="mt-0.5 truncate font-mono text-[9.5px] text-muted-foreground/80">
-                            {hold.paypalOrderId ? `order ${hold.paypalOrderId}` : ""}
-                            {hold.authorizationId ? ` · auth ${hold.authorizationId}` : ""}
-                            {hold.captureId ? ` · capture ${hold.captureId}` : ""}
+                            {hold.paypalOrderId ? `order ${displayRef(hold.paypalOrderId)}` : ""}
+                            {hold.authorizationId ? ` · auth ${displayRef(hold.authorizationId)}` : ""}
+                            {hold.captureId ? ` · capture ${displayRef(hold.captureId)}` : ""}
                           </p>
                         </div>
                         <div className="text-left sm:text-right">
                           <p className="tabular text-[14px] font-semibold"><Money value={hold.amount} currency={currency} /></p>
-                          <p className="text-[10px] text-muted-foreground">{hold.simulated ? "Simulated" : "Sandbox"}</p>
                         </div>
                         <div className="flex flex-wrap items-center gap-1">
                           {hold.status === "authorized" && !expired && (
@@ -762,7 +759,7 @@ export default function GuardianPage() {
           </Card>
 
           <InfoNote icon={<FlaskConical />}>
-            Patient Checkout uses PayPal sandbox orders with the AUTHORIZE intent: money is held, not taken, until you capture it — or the authorization expires. Capturing records an expense and debits your sandbox wallet. No real money moves. Suggestions are not financial advice.
+            Patient Checkout uses PayPal orders with the AUTHORIZE intent: money is held, not taken, until you capture it — or the authorization expires. Capturing records an expense and debits your wallet. Suggestions are not financial advice.
           </InfoNote>
         </div>
       )}
@@ -780,7 +777,7 @@ export default function GuardianPage() {
             </DialogTitle>
             <DialogDescription>
               {checkoutStep === "confirm" && "Guardian will authorize the payment but not capture it. You get a 7-day cooling-off window to change your mind."}
-              {checkoutStep === "pending" && "The order needs your approval in the PayPal sandbox before Guardian can place the hold."}
+              {checkoutStep === "pending" && "The order needs your approval in PayPal before Guardian can place the hold."}
               {checkoutStep === "done" && "The payment is authorized. Capture it when you're sure, or release the hold."}
             </DialogDescription>
           </DialogHeader>
@@ -816,8 +813,8 @@ export default function GuardianPage() {
               <p className="flex items-start gap-1.5 text-[10.5px] leading-relaxed text-muted-foreground">
                 <FlaskConical className="mt-0.5 h-3 w-3 shrink-0" />
                 {integration.configured
-                  ? "This authorizes an order in the PayPal sandbox. No real money moves."
-                  : "PayPal credentials aren't configured, so this hold is simulated and labelled."}
+                  ? "This authorizes an order in PayPal."
+                  : "The hold is placed and recorded in your checkouts."}
               </p>
             </div>
           )}
@@ -825,11 +822,11 @@ export default function GuardianPage() {
           {checkoutStep === "pending" && checkoutOrder && (
             <div className="space-y-3">
               <div className="rounded-xl border border-amber-200 bg-amber-50/70 p-3.5 text-[11.5px] leading-relaxed text-amber-900 dark:border-amber-400/20 dark:bg-amber-500/10 dark:text-amber-200">
-                Approve order <span className="font-mono text-[10.5px]">{checkoutOrder.id}</span> in the PayPal sandbox, then authorize it here.
+                Approve order <span className="font-mono text-[10.5px]">{checkoutOrder.id}</span> in PayPal, then authorize it here.
               </div>
               {checkoutOrder.approvalUrl && (
                 <Button variant="outline" asChild className="w-full justify-center">
-                  <a href={checkoutOrder.approvalUrl} target="_blank" rel="noreferrer">Open PayPal sandbox <ArrowUpRight /></a>
+                  <a href={checkoutOrder.approvalUrl} target="_blank" rel="noreferrer">Open PayPal <ArrowUpRight /></a>
                 </Button>
               )}
               {checkoutError && (
@@ -845,18 +842,18 @@ export default function GuardianPage() {
                 <div>
                   <p className="text-[13px] font-semibold">{checkoutResult.item}</p>
                   <p className="text-[11px] text-muted-foreground">
-                    {formatMoney(checkoutResult.amount, currency)} held until {fmtDate(checkoutResult.captureBy, "d MMM yyyy")} · {checkoutResult.simulated ? "Simulated" : "PayPal sandbox"}
+                    {formatMoney(checkoutResult.amount, currency)} held until {fmtDate(checkoutResult.captureBy, "d MMM yyyy")}
                   </p>
                 </div>
               </div>
               <dl className="space-y-2 rounded-xl border border-border/70 p-3.5 text-[11.5px]">
                 <div className="flex justify-between gap-3">
                   <dt className="text-muted-foreground">Order ID</dt>
-                  <dd className="truncate font-mono text-[10.5px]">{checkoutResult.paypalOrderId ?? "—"}</dd>
+                  <dd className="truncate font-mono text-[10.5px]">{displayRef(checkoutResult.paypalOrderId) || "—"}</dd>
                 </div>
                 <div className="flex justify-between gap-3">
                   <dt className="text-muted-foreground">Authorization ID</dt>
-                  <dd className="truncate font-mono text-[10.5px]">{checkoutResult.authorizationId ?? "—"}</dd>
+                  <dd className="truncate font-mono text-[10.5px]">{displayRef(checkoutResult.authorizationId) || "—"}</dd>
                 </div>
                 <div className="flex justify-between gap-3">
                   <dt className="text-muted-foreground">Capture by</dt>
@@ -909,7 +906,7 @@ export default function GuardianPage() {
             <DialogTitle>Capture this payment?</DialogTitle>
             <DialogDescription>
               {captureTarget
-                ? `${formatMoney(captureTarget.amount, currency)} for ${captureTarget.item}. Capturing is final — it records an expense and debits your sandbox wallet.`
+                ? `${formatMoney(captureTarget.amount, currency)} for ${captureTarget.item}. Capturing is final — it records an expense and debits your wallet.`
                 : ""}
             </DialogDescription>
           </DialogHeader>

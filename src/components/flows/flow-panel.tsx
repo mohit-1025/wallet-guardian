@@ -358,7 +358,7 @@ export function FlowPanel({
           <DialogHeader>
             <DialogTitle>{editing ? "Edit expense" : `Add to ${FLOW_TAB_LABEL[tab]}`}</DialogTitle>
             <DialogDescription>
-              Name it and set the amount. Turn on autopay to pay it from your PayPal sandbox on a schedule.
+              Name it and set the amount. Turn on autopay to pay it from PayPal on a schedule.
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-3.5">
@@ -391,7 +391,7 @@ export function FlowPanel({
                 <span>
                   <span className="flex items-center gap-1.5 text-[12.5px] font-semibold"><CalendarClock className="h-3.5 w-3.5 text-primary" /> Add autopay</span>
                   <span className="mt-0.5 block text-[11px] leading-relaxed text-muted-foreground">
-                    Send this expense from your PayPal sandbox to the receiver on a repeating schedule.
+                    Send this expense from PayPal to the receiver on a repeating schedule.
                   </span>
                 </span>
                 <Switch id="flow-autopay" checked={autopayOn} onCheckedChange={enableAutopay} aria-label="Add autopay" />
@@ -445,7 +445,7 @@ export function FlowPanel({
                   )}
                   <p className="flex items-start gap-1.5 text-[10.5px] leading-relaxed text-muted-foreground">
                     <FlaskConical className="mt-0.5 h-3 w-3 shrink-0" />
-                    Sandbox only. The receiver email should belong to a PayPal sandbox account for real API calls, otherwise the run is simulated.
+                    The receiver email must belong to a PayPal account to receive the payout.
                   </p>
                 </div>
               )}
