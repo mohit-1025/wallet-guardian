@@ -216,6 +216,10 @@ app.use("/api", (req, res, next) => {
   next();
 });
 
+app.get("/api/health", (_req, res) => {
+  res.json({ ok: true, env: "sandbox" });
+});
+
 const rateBuckets = new Map();
 app.use("/api", (req, res, next) => {
   const ip = req.ip || "local";

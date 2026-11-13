@@ -1,0 +1,23 @@
+services:
+  - type: web
+    name: wallet-guardian-api
+    runtime: node
+    plan: free
+    region: singapore
+    buildCommand: npm ci
+    startCommand: node server/index.mjs
+    healthCheckPath: /api/health
+    autoDeploy: true
+    envVars:
+      - key: SESSION_SECRET
+        generateValue: true
+      - key: WG_SETTINGS_KEY
+        generateValue: true
+      - key: PUBLIC_BASE_URL
+        value: https://walletguardian.vercel.app
+      - key: APP_BASE_URL
+        value: https://walletguardian.vercel.app
+      - key: TRUST_PROXY
+        value: "2"
+      - key: USD_INR_RATE
+        value: "83.2"
