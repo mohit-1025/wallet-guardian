@@ -52,19 +52,11 @@ Vercel's Vite preset serves **only the static frontend**. `server/index.mjs` doe
 
 Run the API on a Node host (Render, Railway, Fly and similar) and keep Vercel as the frontend:
 
-1. Create a Node web service from this repo on the API host. Build with `npm ci && npm run build`, start with `node server/index.mjs --serve-dist`, and set:
-   - `PAYPAL_SANDBOX_CLIENT_ID`, `PAYPAL_SANDBOX_CLIENT_SECRET`
-   - `SESSION_SECRET` (32-byte random value)
-   - `PUBLIC_BASE_URL=https://walletguardian.vercel.app`
-   - `APP_BASE_URL=https://walletguardian.vercel.app`
-   - `TRUST_PROXY=2` (Vercel edge + host load balancer)
-   - `WG_DATA_DIR` on a persistent volume so accounts survive redeploys
-   - `WG_SETTINGS_KEY` (64-hex random value) so sandbox credentials connected through onboarding stay decryptable across redeploys
-   - optional: `PAYPAL_SANDBOX_PAYOUTS_ENABLED`, `PAYPAL_SANDBOX_INVOICER_EMAIL`, `USD_INR_RATE`
-2. In [`vercel.json`](vercel.json), replace `https://YOUR-API-HOST.onrender.com` with the API service's public origin, then redeploy the Vercel project. `vercel.json` cannot read environment variables, so this one URL is committed in the file.
+1. Deploy the API from [`render.yaml`](render.yaml) with a Render Blueprint. It provisions a free Node web service named `wallet-guardian-api`, starts `node server/index.mjs`, generates `SESSION_SECRET` and `WG_SETTINGS_KEY`, and sets the public URLs and proxy hops. PayPal values are unnecessary here: each account attaches its own sandbox app during onboarding.
+2. In [`vercel.json`](vercel.json), the `/api/*` rewrite points at the Render origin (`https://wallet-guardian-api.onrender.com`). Redeploy Vercel after changing it — the file cannot read environment variables, so the URL is committed.
 3. Register and sign in at `/login` on the Vercel domain. The browser talks to `/api` on the same origin, so the session cookie stays first-party.
 
-Sessions are held in the API process's memory, so use a single instance and expect a sign-out after redeploys. Accounts persist in SQLite under `WG_DATA_DIR`.
+Sessions are held in the API process's memory, so use a single instance and expect a sign-out after redeploys. On the free plan the SQLite files under `WG_DATA_DIR` sit on ephemeral disk, so accounts and attached sandbox credentials reset whenever the service restarts or idles out. Upgrade to a paid instance with a persistent disk (and point `WG_DATA_DIR` at it) if accounts must survive.
 
 ---
 
