@@ -345,7 +345,7 @@ export default function BudgetPage() {
                       <BarChart data={flowRows} margin={{ top: 8, right: 4, left: -16, bottom: 0 }} barGap={3}>
                         <CartesianGrid vertical={false} stroke="hsl(var(--border))" strokeDasharray="3 4" />
                         <XAxis dataKey="label" axisLine={false} tickLine={false} tick={{ fontSize: 10.5 }} dy={6} interval={0} />
-                        <YAxis axisLine={false} tickLine={false} tick={{ fontSize: 10 }} tickFormatter={(v) => formatCompact(Number(v), currency)} width={58} />
+                        <YAxis axisLine={false} tickLine={false} tick={{ fontSize: 10 }} tickFormatter={(v) => formatCompact(Number(v), currency)} width={76} />
                         <Tooltip content={<ChartTooltip currency={currency} />} cursor={{ fill: "hsl(var(--muted) / 0.5)" }} />
                         <Bar dataKey="planned" name="Plan target" fill="#c7d2fe" radius={[5, 5, 0, 0]} maxBarSize={18} />
                         <Bar dataKey="flows" name="Money flows" fill="#4f46e5" radius={[5, 5, 0, 0]} maxBarSize={18} />

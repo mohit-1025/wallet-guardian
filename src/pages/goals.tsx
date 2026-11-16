@@ -316,7 +316,7 @@ export default function GoalsPage() {
                         </defs>
                         <CartesianGrid vertical={false} stroke="hsl(var(--border))" strokeDasharray="3 4" />
                         <XAxis dataKey="month" axisLine={false} tickLine={false} tick={{ fontSize: 10 }} dy={6} interval={1} />
-                        <YAxis axisLine={false} tickLine={false} tick={{ fontSize: 10 }} tickFormatter={(v) => formatCompact(Number(v), currency)} width={52} />
+                        <YAxis axisLine={false} tickLine={false} tick={{ fontSize: 10 }} tickFormatter={(v) => formatCompact(Number(v), currency)} width={76} />
                         <Tooltip content={<ChartTooltip currency={currency} />} />
                         <Area type="monotone" dataKey="saved" name="Projected saved" stroke="#059669" strokeWidth={2.2} fill="url(#goalForecast)" dot={false} activeDot={{ r: 4 }} />
                       </AreaChart>

@@ -342,7 +342,7 @@ export default function AnalyticsPage() {
                     <BarChart data={series} margin={{ top: 8, right: 4, left: -16, bottom: 0 }} barGap={4}>
                       <CartesianGrid vertical={false} stroke="hsl(var(--border))" strokeDasharray="3 4" />
                       <XAxis dataKey="label" axisLine={false} tickLine={false} tick={{ fontSize: 11 }} dy={6} />
-                      <YAxis axisLine={false} tickLine={false} tick={{ fontSize: 10 }} tickFormatter={(v) => formatCompact(Number(v), currency)} width={54} />
+                      <YAxis axisLine={false} tickLine={false} tick={{ fontSize: 10 }} tickFormatter={(v) => formatCompact(Number(v), currency)} width={76} />
                       <Tooltip content={<ChartTooltip currency={currency} />} cursor={{ fill: "hsl(var(--muted) / 0.5)" }} />
                       <Bar dataKey="income" name="Income" fill="#4f46e5" radius={[5, 5, 0, 0]} maxBarSize={22} />
                       <Bar dataKey="expenses" name="Expenses" fill="#f59e0b" radius={[5, 5, 0, 0]} maxBarSize={22} />

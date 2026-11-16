@@ -333,7 +333,7 @@ export default function ShopperPage() {
                             axisLine={false}
                             tickLine={false}
                             tick={{ fontSize: 10 }}
-                            width={58}
+                            width={68}
                             domain={["dataMin - 200", "dataMax + 200"]}
                             tickFormatter={(v) => formatCompact(Number(v), currency)}
                           />

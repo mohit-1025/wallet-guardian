@@ -247,7 +247,7 @@ export default function DashboardPage() {
                       </defs>
                       <CartesianGrid vertical={false} stroke="hsl(var(--border))" strokeDasharray="3 4" />
                       <XAxis dataKey="label" axisLine={false} tickLine={false} tick={{ fontSize: 11 }} dy={6} />
-                      <YAxis axisLine={false} tickLine={false} tick={{ fontSize: 10 }} tickFormatter={(v) => formatCompact(Number(v), currency)} width={54} />
+                      <YAxis axisLine={false} tickLine={false} tick={{ fontSize: 10 }} tickFormatter={(v) => formatCompact(Number(v), currency)} width={76} />
                       <Tooltip content={<ChartTooltip currency={currency} />} />
                       <Area type="monotone" dataKey="income" name="Income" stroke="#4f46e5" strokeWidth={2.2} fill="url(#dashIncome)" dot={false} activeDot={{ r: 4 }} />
                       <Area type="monotone" dataKey="expenses" name="Expenses" stroke="#f59e0b" strokeWidth={2.2} fill="url(#dashExpense)" dot={false} activeDot={{ r: 4 }} />

@@ -26,6 +26,26 @@ Built with React 18 + TypeScript, Vite, Tailwind CSS, shadcn-style Radix compone
 
 ---
 
+## 📸 Screenshots
+
+![Wallet Guardian landing page](docs/screenshots/landing.png)
+
+| Dashboard | Smart budget |
+| --- | --- |
+| ![Dashboard with wallet balance, budget health, safe to spend and Guardian insight](docs/screenshots/dashboard.png) | ![Smart budget funding goals first, then necessities, wants and savings](docs/screenshots/budget.png) |
+| **Transactions** | **Money flows** |
+| ![Transactions list with categories, methods, dates and amounts](docs/screenshots/transactions.png) | ![Subscriptions money flow with a month calendar and Guardian waste flags](docs/screenshots/flows.png) |
+| **Wallet** | **Reminders** |
+| ![Wallet and PayPal with balance, add money, pay someone and activity](docs/screenshots/wallet.png) | ![Reminders split list with schedule payment and schedule invoice actions](docs/screenshots/reminders.png) |
+| **AI Guardian** | **Smart Shopper** |
+| ![AI Guardian insights with critical and warning flags](docs/screenshots/guardian.png) | ![Smart Shopper comparing retailer offers with a price history chart](docs/screenshots/shopper.png) |
+| **Dashboard (dark theme)** | **Analytics** |
+| ![Dashboard in dark theme](docs/screenshots/dashboard-dark.png) | ![Analytics with category split, income vs expenses and savings rate](docs/screenshots/analytics.png) |
+
+All screenshots come from the seeded demo workspace at a 1500×940 viewport.
+
+---
+
 ## 🚀 Quick start
 
 ```bash
@@ -192,6 +212,7 @@ src/
                           logic, money/FX, seed data, PayPal client, CSV helpers
 render.yaml               Render Blueprint for the API service
 vercel.json               Static frontend + /api proxy rewrite
+docs/screenshots/         README screenshots from the seeded demo workspace
 ```
 
 ---
